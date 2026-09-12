@@ -193,8 +193,8 @@ namespace QB
             const float questionInfoHeight  = CalculateWrappedTextHeight(p_Question.Text, p_Width);
             float categoriesHeight          = CalculateCategoryButtonsHeight(p_Question.Categories, p_Width);
 
-            const size_t optionCount        = p_Question.Options.size();
-            const size_t rowCount           = (optionCount + 2) / 3;
+            const int optionCount           = p_Question.CurrentOptionIndex + 1;
+            const int rowCount              = (optionCount + 2) / 3;
             float answerTableHeight         = 0.0f;
             if (rowCount > 0)
             {
@@ -305,10 +305,32 @@ namespace QB
                     m_QuestionWindow = true;
                 }
 
+                if (ImGui::MenuItem("Finalizar Tentativa"))
+                {
+                    m_StatusWindow        = true;
+                    m_Status              = {};
+                    m_Status.TotalAnswers = (int)m_Bank.Questions.size();
+                    for (int i = 0; i < m_Status.TotalAnswers; i++)
+                    {
+                        auto& question = m_Bank.Questions[i];
+                        if (question.OptionMarkedIndex == question.CorrectOptionIndex)
+                        {
+                            if (question.Options[question.OptionMarkedIndex] == question.CorrectOptionText)
+                                m_Status.CorrectAnswers++;
+                        }
+                        else
+                        {
+                            m_Status.IncorrectQuestions.push_back(i);
+                        }
+                    }
+                }
+
                 ImGui::EndMenuBar();
             }
 
             QuestionCreation();
+
+            StatusWindow();
 
             ImGui::SetNextWindowDockID(ImGui::GetID("MyDockspace"), ImGuiCond_Once);
             ImGui::Begin("QBank");
@@ -346,9 +368,8 @@ namespace QB
                             ImGui::TableSetupColumn("B", ImGuiTableColumnFlags_WidthStretch);
                             ImGui::TableSetupColumn("C", ImGuiTableColumnFlags_WidthStretch);
 
-                            const size_t optionCount = question.Options.size();
-
-                            for (size_t i = 0; i < optionCount; i += 3)
+                            const int optionCount = question.CurrentOptionIndex;
+                            for (int i = 0; i < optionCount; i += 3)
                             {
                                 ImGui::TableNextRow();
 
@@ -383,24 +404,6 @@ namespace QB
                         }
                     }
                     ImGui::EndChild();
-
-                    if (question.OptionMarkedIndex != -1 && question.OptionMarkedIndex != question.CorrectOptionIndex)
-                    {
-                        float height = CalculateWrappedTextHeight(question.Explanation, ImGui::GetContentRegionAvail().x, PADDING);
-                        ImGui::BeginChild("Explanation", ImVec2(0, height), true);
-
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.0f, 0.0f, 1.0f));
-
-                        ImGui::SetCursorPos(ImVec2(PADDING, PADDING));
-
-                        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x - PADDING);
-                        ImGui::TextUnformatted(question.Explanation.c_str());
-                        ImGui::PopTextWrapPos();
-
-                        ImGui::PopStyleColor();
-
-                        ImGui::EndChild();
-                    }
 
                     ImGui::TreePop();
                 }
@@ -453,6 +456,8 @@ namespace QB
         static char questionText[1024]    = {};
         static char explanationText[1024] = {};
         static char answerText[256] = {};
+
+        ImGui::SetNextWindowSizeConstraints({ 400, 500 }, { FLT_MAX, FLT_MAX });
         ImGui::Begin("##QuestionEditor", &m_QuestionWindow, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse);
 
         ImGui::BeginChild("##Child", ImVec2(0, ImGui::GetContentRegionAvail().y - 23.0f), true);
@@ -463,7 +468,7 @@ namespace QB
         ImGui::Text("Explicação:");
         ImGui::InputTextMultiline("##Explanation", explanationText, sizeof(explanationText), ImVec2(width, 50.0f), ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_WordWrap);
 
-        float lineCount                   = std::max(CalculateCategoryLineCount(newQuestion.Categories, width), 1);
+        float lineCount                   = (float)std::max(CalculateCategoryLineCount(newQuestion.Categories, width), 1);
         float textHeight                  = lineCount * ImGui::GetTextLineHeight() + (lineCount - 1.0f + 4.0f) * ImGui::GetStyle().ItemSpacing.y;
 
         ImGui::BeginChild("##NewQuestionCategories", { 0, textHeight }, true);
@@ -563,23 +568,27 @@ namespace QB
 
         if (ImGui::InputText("##NewAnswer", answerText, sizeof(answerText), ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EnterReturnsTrue))
         {
-            if (newQuestion.Options.size() < 26)
+            if (newQuestion.CurrentOptionIndex < 26)
             {
                 std::string answer(answerText);
-                newQuestion.Options.push_back(answer);
+                newQuestion.Options[newQuestion.CurrentOptionIndex] = answer;
+                newQuestion.CurrentOptionIndex++;
             }
             answerText[0] = '\0';
         }
         ImGui::SameLine();
         if (ImGui::Button(" + "))
         {
-            if (newQuestion.Options.size() < 26)
+            if (newQuestion.CurrentOptionIndex < 26)
             {
                 std::string answer(answerText);
-                newQuestion.Options.push_back(answer);
+                newQuestion.Options[newQuestion.CurrentOptionIndex] = answer;
+                newQuestion.CurrentOptionIndex++;
             }
             answerText[0] = '\0';
         }
+
+        std::vector<int> questionsToDelete;
 
         if (ImGui::BeginTable("AnswerOptions", 3, ImGuiTableFlags_SizingStretchProp))
         {
@@ -587,8 +596,8 @@ namespace QB
             ImGui::TableSetupColumn("B", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("C", ImGuiTableColumnFlags_WidthStretch);
 
-            const size_t optionCount = newQuestion.Options.size();
-            for (size_t i = 0; i < optionCount; i += 3)
+            const int optionCount = newQuestion.CurrentOptionIndex;
+            for (int i = 0; i < optionCount; i += 3)
             {
                 ImGui::TableNextRow();
 
@@ -621,6 +630,11 @@ namespace QB
                     ImGui::PushTextWrapPos();
                     ImGui::TextUnformatted(newQuestion.Options[optionIndex].c_str());
                     ImGui::PopTextWrapPos();
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("X"))
+                    {
+                        questionsToDelete.push_back(index);
+                    }
 
                     if (marked)
                         ImGui::PopStyleColor();
@@ -629,11 +643,36 @@ namespace QB
                 }
             }
             ImGui::EndTable();
+
+            if (!questionsToDelete.empty())
+            {
+                std::array<std::string, 26> options = newQuestion.Options;
+                const int count                     = newQuestion.CurrentOptionIndex;
+                newQuestion.Options.fill("");
+                newQuestion.CurrentOptionIndex      = 0;
+
+                for (auto& index : questionsToDelete)
+                {
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (i == index)
+                            continue;
+
+                        newQuestion.Options[newQuestion.CurrentOptionIndex] = options[i];
+                        newQuestion.CurrentOptionIndex++;
+                    }
+                }
+
+                questionsToDelete.clear();
+            }
+
         }
 
         ImGui::EndChild();
 
         ImGui::EndChild();
+
+        ImGui::BeginDisabled(questionText[0] == '\0' || newQuestion.CurrentOptionIndex == 0 || newQuestion.CorrectOptionIndex == -1);
 
         if (ImGui::Button("Cancelar", ImVec2(100, 0)))
         {
@@ -652,10 +691,144 @@ namespace QB
             explanationText[0]              = '\0';
             answerText[0]                   = '\0';
             m_Bank.Questions.push_back(newQuestion);
+
             newQuestion = {};
             m_QuestionWindow = false;
         }
 
+        ImGui::EndDisabled();
+
+        ImGui::End();
+    }
+
+    void Application::StatusWindow()
+    {
+        if (!m_StatusWindow) return;
+
+        ImGui::SetNextWindowSizeConstraints({ 350, 400 }, { FLT_MAX, FLT_MAX });
+        ImGui::Begin("##StatusWindow", &m_StatusWindow, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse);
+
+        const auto size = ImGui::GetContentRegionAvail();
+        ImGui::BeginChild("##StatusInfo", { 0.0f, size.y - 23.0f }, false);
+
+        ImGui::Text("Respostas Corretas: %i/%i", m_Status.CorrectAnswers, m_Status.TotalAnswers);
+        
+        if (m_Status.CorrectAnswers == m_Status.TotalAnswers)
+        {
+            ImGui::TextColored({ 0.0f, 1.0f, 0.0f, 1.0f }, "Parabéns, você acertou todas as questões!!!");
+        }
+        else
+        {
+            if (ImGui::TreeNodeEx("Respostas Incorretas", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_FramePadding))
+            {
+                ImGui::BeginChild("##IncorrectAnswers", { 0.0f, 0.0f }, true);
+
+                for (size_t i = 0; i < m_Status.IncorrectQuestions.size(); ++i)
+                {
+                    auto& question = m_Bank.Questions[i];
+                    ImGui::PushID((int)i);
+
+                    if (ImGui::TreeNodeEx(("Questão " + std::to_string(i + 1)).c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_FramePadding | ImGuiTreeNodeFlags_Bullet))
+                    {
+                        float questionDetailsHeight = CalculateQuestionDetailsHeight(question, ImGui::GetContentRegionAvail().x);
+                        ImGui::BeginChild("QuestionDetails", ImVec2(0, questionDetailsHeight), true);
+                        {
+                            DrawCategoryButtons(question.Categories, ImGui::GetContentRegionAvail().x);
+
+                            float questionInfoHeight = CalculateWrappedTextHeight(question.Text, ImGui::GetContentRegionAvail().x, PADDING);
+                            ImGui::BeginChild("QuestionInfo", ImVec2(0, questionInfoHeight), true);
+
+                            ImGui::SetCursorPos(ImVec2(PADDING, PADDING));
+                            ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x - PADDING);
+                            ImGui::TextUnformatted(question.Text.c_str());
+                            ImGui::PopTextWrapPos();
+
+                            ImGui::EndChild();
+
+                            if (ImGui::BeginTable("AnswerOptions", 3, ImGuiTableFlags_SizingStretchProp))
+                            {
+                                ImGui::TableSetupColumn("A", ImGuiTableColumnFlags_WidthStretch);
+                                ImGui::TableSetupColumn("B", ImGuiTableColumnFlags_WidthStretch);
+                                ImGui::TableSetupColumn("C", ImGuiTableColumnFlags_WidthStretch);
+
+                                const int optionCount = question.CurrentOptionIndex;
+                                for (int i = 0; i < optionCount; i += 3)
+                                {
+                                    ImGui::TableNextRow();
+
+                                    for (size_t column = 0; column < 3; column++)
+                                    {
+                                        const size_t optionIndex = i + column;
+
+                                        ImGui::TableNextColumn();
+
+                                        if (optionIndex >= optionCount)
+                                            continue;
+
+                                        auto index = static_cast<int>(optionIndex);
+                                        ImGui::PushID(index);
+
+                                        if (optionIndex == question.CorrectOptionIndex)
+                                            ImGui::PushStyleColor(ImGuiCol_Text, { 0.0f, 1.0f, 0.0f, 1.0f });
+                                        else if (optionIndex == question.OptionMarkedIndex)
+                                            ImGui::PushStyleColor(ImGuiCol_Text, { 1.0f, 0.0f, 0.0f, 1.0f });
+
+                                        ImGui::Text("(%c)", 'A' + static_cast<char>(optionIndex));
+                                        ImGui::SameLine();
+                                        ImGui::PushTextWrapPos();
+                                        ImGui::TextUnformatted(question.Options[optionIndex].c_str());
+                                        ImGui::PopTextWrapPos();
+
+                                        if (optionIndex == question.CorrectOptionIndex || optionIndex == question.OptionMarkedIndex)
+                                            ImGui::PopStyleColor();
+
+                                        ImGui::PopID();
+                                    }
+                                }
+                                ImGui::EndTable();
+                            }
+                        }
+                        ImGui::EndChild();
+
+                        if (question.OptionMarkedIndex != question.CorrectOptionIndex && !question.Explanation.empty())
+                        {
+                            ImGui::Text("Explicação:");
+
+                            float height = CalculateWrappedTextHeight(question.Explanation, ImGui::GetContentRegionAvail().x, PADDING);
+                            ImGui::BeginChild("##Explanation", ImVec2(0, height), true);
+
+                            ImGui::SetCursorPos(ImVec2(PADDING, PADDING));
+
+                            ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x - PADDING);
+                            ImGui::TextUnformatted(question.Explanation.c_str());
+                            ImGui::PopTextWrapPos();
+
+                            ImGui::EndChild();
+                        }
+
+                        ImGui::TreePop();
+                    }
+
+                    ImGui::PopID();
+                }
+
+                ImGui::EndChild();
+                ImGui::TreePop();
+            }
+        }
+
+        ImGui::EndChild();
+
+        // TODO: Add a way to save the status of each attempt and show it somewhere
+        if (ImGui::Button("Fechar", ImVec2(100, 0)))
+        {
+            m_Status = {};
+            for (auto& question : m_Bank.Questions)
+            {
+                question.OptionMarkedIndex = -1;
+            }
+            m_StatusWindow = false;
+        }
         ImGui::End();
     }
 
