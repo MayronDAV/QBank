@@ -1,9 +1,12 @@
 #include "Application.h"
+#include "FileDialog.h"
 
 // std
 #include <iostream>
 #include <sstream>
 #include <algorithm>
+#include <fstream>
+#include <filesystem>
 
 // lib
 #include <glad/glad.h>
@@ -19,8 +22,9 @@ namespace QB
     namespace
     {
         static constexpr float PADDING = 10.0f;
+        static constexpr const char* FOLDER_PATH = "Banks";
 
-        void  BeginDockspace(std::string p_ID, std::string p_Dockspace, bool p_MenuBar, ImGuiDockNodeFlags p_DockFlags)
+        static void  BeginDockspace(std::string p_ID, std::string p_Dockspace, bool p_MenuBar, ImGuiDockNodeFlags p_DockFlags)
         {
             static bool opt_fullscreen = true;
             static bool opt_padding = false;
@@ -70,12 +74,12 @@ namespace QB
             }
         }
 
-        void  EndDockspace()
+        static void  EndDockspace()
         {
             ImGui::End();
         }
 
-        void  DrawCategoryButtons(const std::string& categories, float p_Width)
+        static void  DrawCategoryButtons(const std::string& categories, float p_Width)
         {
             std::stringstream ss(categories);
             const ImGuiStyle& style       = ImGui::GetStyle();
@@ -102,7 +106,7 @@ namespace QB
             }
         }
 
-        void  DrawCategoryTexts(const std::string& categories, float p_Width, bool p_AddSeparator = false)
+        static void  DrawCategoryTexts(const std::string& categories, float p_Width, bool p_AddSeparator = false)
         {
             std::stringstream ss(categories);
             const ImGuiStyle& style = ImGui::GetStyle();
@@ -136,7 +140,7 @@ namespace QB
             }
         }
 
-        int   CalculateCategoryLineCount(const std::string& p_Categories, float p_Width)
+        static int   CalculateCategoryLineCount(const std::string& p_Categories, float p_Width)
         {
             std::stringstream ss(p_Categories);
             const ImGuiStyle& style       = ImGui::GetStyle();
@@ -168,7 +172,7 @@ namespace QB
             return first ? 0 : lineCount;
         }
 
-        float CalculateCategoryButtonsHeight(const std::string& p_Categories, float p_Width)
+        static float CalculateCategoryButtonsHeight(const std::string& p_Categories, float p_Width)
         {
             const ImGuiStyle& style = ImGui::GetStyle();
             int lineCount           = CalculateCategoryLineCount(p_Categories, p_Width);
@@ -176,7 +180,7 @@ namespace QB
             return height;
         }
 
-        float CalculateWrappedTextHeight(const std::string& p_Text, float p_Width, float p_Padding = PADDING)
+        static float CalculateWrappedTextHeight(const std::string& p_Text, float p_Width, float p_Padding = PADDING)
         {
             const ImGuiStyle& style = ImGui::GetStyle();
             const float textWidth   = p_Width - style.ChildBorderSize * 2.0f - p_Padding * 2.0f;
@@ -185,7 +189,7 @@ namespace QB
             return textSize.y + p_Padding * 2.0f + style.ChildBorderSize * 2.0f;
         }
 
-        float CalculateQuestionDetailsHeight(const Question& p_Question, float p_Width)
+        static float CalculateQuestionDetailsHeight(const Question& p_Question, float p_Width)
         {
             const ImGuiStyle& style         = ImGui::GetStyle();
             const float childBorder         = style.ChildBorderSize;
@@ -207,70 +211,208 @@ namespace QB
             return contentHeight + style.WindowPadding.y * 2.0f + childBorder * 2.0f + PADDING;
         }
 
+        static void  WriteString(std::ofstream& p_Out, const std::string& p_Str)
+        {
+            size_t size = p_Str.size();
+            p_Out.write(reinterpret_cast<const char*>(&size), sizeof(size));
+            p_Out.write(p_Str.data(), size);
+        }
+
+        static std::string ReadString(std::ifstream& p_In)
+        {
+            size_t size = 0;
+            p_In.read(reinterpret_cast<char*>(&size), sizeof(size));
+
+            std::string str(size, '\0');
+            p_In.read(&str[0], size);
+
+            return str;
+        }
+
+        struct QBHeader
+        {
+            char Magic[5]         = { 'Q', 'B', 'A', 'N', 'K'};
+            uint32_t Version      = 1;
+            size_t TotalQuestions = 0;
+        };
+
+        static bool  ExportQuestionBank(const Bank& p_Bank)
+        {
+            std::filesystem::path folder = FOLDER_PATH;
+            if (!std::filesystem::exists(folder))
+                std::filesystem::create_directories(folder);
+
+            const auto path = folder / (p_Bank.Name + ".qbank");
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (!out)
+            {
+                std::cerr << "Failed to export bank at " << path.string() << "\n";
+                return false;
+            }
+
+            QBHeader header;
+            header.TotalQuestions = p_Bank.Questions.size();
+            out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+
+            WriteString(out, p_Bank.Categories);
+
+            for (size_t i = 0; i < header.TotalQuestions; i++)
+            {
+                auto& question = p_Bank.Questions[i];
+                WriteString(out, question.Text);
+                WriteString(out, question.Explanation);
+                WriteString(out, question.Categories);
+                WriteString(out, question.CorrectOptionText);
+                out.write(reinterpret_cast<const char*>(&question.CorrectOptionIndex), sizeof(question.CorrectOptionIndex));
+                out.write(reinterpret_cast<const char*>(&question.CurrentOptionIndex), sizeof(question.CurrentOptionIndex));
+
+                for (int j = 0; j < question.CurrentOptionIndex; j++)
+                {
+                    WriteString(out, question.Options[j]);
+                }
+            }
+
+            return true;
+        }
+
+        static Bank  ImportQuestionBank(const std::string& p_Path)
+        {
+            Bank bank = {};
+            bank.Name = std::filesystem::path(p_Path).stem().string();
+
+            std::ifstream in(p_Path, std::ios::binary);
+            if (!in)
+            {
+                std::cerr << "Failed to import bank: " << p_Path << "\n";
+                return {};
+            }
+
+            QBHeader header;
+            in.read(reinterpret_cast<char*>(&header), sizeof(header));
+
+            bank.Categories                = ReadString(in);
+
+            for (size_t i = 0; i < header.TotalQuestions; i++)
+            {
+                auto& question             = bank.Questions.emplace_back();
+                question.Text              = ReadString(in);
+                question.Explanation       = ReadString(in);
+                question.Categories        = ReadString(in);
+                question.CorrectOptionText = ReadString(in);
+                in.read(reinterpret_cast<char*>(&question.CorrectOptionIndex), sizeof(question.CorrectOptionIndex));
+                in.read(reinterpret_cast<char*>(&question.CurrentOptionIndex), sizeof(question.CurrentOptionIndex));
+
+                for (int j = 0; j < question.CurrentOptionIndex; j++)
+                {
+                    question.Options[j]    = ReadString(in);
+
+                    if (question.CorrectOptionText == question.Options[j])
+                        question.CorrectOptionIndex = j;
+                }
+            }
+
+            return bank;
+        }
+
+        struct APPHeader
+        {
+            char Magic[5]         = { 'Q', 'B', 'A', 'P', 'P' };
+            uint32_t Version      = 1;
+        };
+
+        static bool  ExportAppConfig(const ApplicationConfig& p_Config)
+        {
+            const std::string path = "ini.qbapp";
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (!out)
+            {
+                std::cerr << "Failed to export app config at " << path << "\n";
+                return false;
+            }
+
+            APPHeader header;
+            out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+
+            WriteString(out, p_Config.StartBank);
+            out.write(reinterpret_cast<const char*>(&p_Config.Maximize), sizeof(p_Config.Maximize));
+            out.write(reinterpret_cast<const char*>(&p_Config.Width), sizeof(p_Config.Width));
+            out.write(reinterpret_cast<const char*>(&p_Config.Height), sizeof(p_Config.Height));
+
+            return true;
+        }
+
+        static ApplicationConfig ImportAppConfig()
+        {
+            const std::string path   = "ini.qbapp";
+            ApplicationConfig config = {};
+
+            if (!std::filesystem::exists(path))
+                return config;
+
+            std::ifstream in(path, std::ios::binary);
+            if (!in)
+            {
+                std::cerr << "Failed to import app config: " << path << "\n";
+                return config;
+            }
+
+            APPHeader header;
+            in.read(reinterpret_cast<char*>(&header), sizeof(header));
+
+            config.StartBank = ReadString(in);
+            in.read(reinterpret_cast<char*>(&config.Maximize), sizeof(config.Maximize));
+            in.read(reinterpret_cast<char*>(&config.Width), sizeof(config.Width));
+            in.read(reinterpret_cast<char*>(&config.Height), sizeof(config.Height));
+
+            return config;
+        }
+
     } // namespace
 
     Application::Application()
     {
-        if (!glfwInit())
+        Init();
+    }
+
+    Application::Application(int p_Argc, char** p_Argv)
+    {
+        std::string bankPath = "";
+
+        for (int i = 0; i < p_Argc; i++)
         {
-            std::cerr << "Failed to initialize GLFW\n";
-            std::exit(-1);
+            if (strcmp(p_Argv[i], "--help") == 0 || strcmp(p_Argv[i], "-h") == 0)
+            {
+                std::cout << "Usage: \n";
+                std::cout << "  --help[-h]                   | Show this message.\n";
+                std::cout << "  --bank[-b] [bank_path]       | Open the QBank with the bank path!\n";
+            }
+
+            if (strcmp(p_Argv[i], "--bank") == 0 || strcmp(p_Argv[i], "-b") == 0)
+            {
+                if (i + 1 < p_Argc)
+                    bankPath = std::filesystem::absolute(p_Argv[i + 1]).string();
+                else
+                    std::cout << "Bank path not provided after --bank or -b flag.\n";
+            }
         }
 
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
-        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        Init(bankPath.empty());
 
-        m_Window = glfwCreateWindow(
-            800,
-            600,
-            "QBank",
-            nullptr,
-            nullptr
-        );
-
-        if (!m_Window)
+        if (!bankPath.empty())
         {
-            std::cerr << "Failed to create GLFW window\n";
-            glfwTerminate();
-            std::exit(-1);
+            if (std::filesystem::exists(bankPath))
+                m_Data.CurrentBank = ImportQuestionBank(bankPath);
+            else
+                std::cerr << "Failed to open the bank path, the file doesn't exist! " << bankPath << "\n";
         }
-
-        glfwMakeContextCurrent(m_Window);
-        glfwSwapInterval(1);
-
-        if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
-        {
-            std::cerr << "Failed to initialize GLAD\n";
-
-            glfwDestroyWindow(m_Window);
-            glfwTerminate();
-            std::exit(-1);
-        }
-
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-
-        ImGuiIO& io = ImGui::GetIO(); (void)io;
-        io.IniFilename = nullptr;
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;       // Enable Keyboard Controls
-        //io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
-        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;           // Enable Docking
-        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;         // Enable Multi-Viewport / Platform Windows
-        io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleViewports;
-        io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleFonts;
-        io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleViewports;
-
-        ImGui::StyleColorsDark();
-
-        ImGui_ImplGlfw_InitForOpenGL(m_Window, true);
-        ImGui_ImplOpenGL3_Init("#version 450");
-
-        m_Bank.Categories = "Category1;Category2;Category3;Category4";
     }
 
     Application::~Application()
     {
+        std::filesystem::path folder = FOLDER_PATH;
+        m_Data.Config.StartBank      = m_Data.CurrentBank.Name.empty() ? "" : (folder / (m_Data.CurrentBank.Name + ".qbank")).lexically_normal().generic_string();
+        ExportAppConfig(m_Data.Config);
+
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();
 
@@ -300,6 +442,63 @@ namespace QB
 
             if (ImGui::BeginMenuBar())
             {
+                if (ImGui::BeginMenu("Arquivo"))
+                {
+                    if (ImGui::MenuItem("Novo"))
+                    {
+                        m_Data.CurrentBank = {};
+                    }
+
+                    if (ImGui::BeginMenu("Abrir"))
+                    {
+                        if (ImGui::MenuItem("Arquivo..."))
+                        {
+                            std::string path = "";
+                            if (FileDialog::Open({ { "Banks", "*.qbank" } }, "Banks", path) == FileDialogResult::SUCCESS)
+                            {
+                                m_Data.CurrentBank = ImportQuestionBank(path);
+                            }
+                        }
+
+                        if (!m_BankNames.empty())
+                            ImGui::Separator();
+
+                        for (const auto& path : m_BankNames)
+                        {
+                            auto stem = std::filesystem::path(path).stem().string();
+                            if (ImGui::MenuItem(stem.c_str()))
+                            {
+                                m_Data.CurrentBank = ImportQuestionBank(path);
+                            }
+                        }
+
+                        ImGui::EndMenu();
+                    }
+
+                    ImGui::Separator();
+
+                    ImGui::BeginDisabled(m_Data.CurrentBank.Name.empty());
+                    if (ImGui::MenuItem("Salvar"))
+                    {
+                        ExportQuestionBank(m_Data.CurrentBank);
+                    }
+                    ImGui::EndDisabled();
+
+                    if (ImGui::MenuItem("Salvar Como"))
+                    {
+                        m_BankExportWindow = true;
+                    }
+
+                    ImGui::Separator();
+
+                    if (ImGui::MenuItem("Sair"))
+                    {
+                        glfwSetWindowShouldClose(m_Window, true);
+                    }
+
+                    ImGui::EndMenu();
+                }
+
                 if (ImGui::MenuItem("Adicionar Questão"))
                 {
                     m_QuestionWindow = true;
@@ -309,10 +508,10 @@ namespace QB
                 {
                     m_StatusWindow        = true;
                     m_Status              = {};
-                    m_Status.TotalAnswers = (int)m_Bank.Questions.size();
+                    m_Status.TotalAnswers = (int)m_Data.CurrentBank.Questions.size();
                     for (int i = 0; i < m_Status.TotalAnswers; i++)
                     {
-                        auto& question = m_Bank.Questions[i];
+                        auto& question = m_Data.CurrentBank.Questions[i];
                         if (question.OptionMarkedIndex == question.CorrectOptionIndex)
                         {
                             if (question.Options[question.OptionMarkedIndex] == question.CorrectOptionText)
@@ -330,19 +529,21 @@ namespace QB
 
             QuestionCreation();
 
+            BankExportWindow();
+
             StatusWindow();
 
             ImGui::SetNextWindowDockID(ImGui::GetID("MyDockspace"), ImGuiCond_Once);
             ImGui::Begin("QBank");
 
-            float categoriesHeight = CalculateCategoryButtonsHeight(m_Bank.Categories, ImGui::GetContentRegionAvail().x);
+            float categoriesHeight = CalculateCategoryButtonsHeight(m_Data.CurrentBank.Categories, ImGui::GetContentRegionAvail().x);
             ImGui::BeginChild("Categories", ImVec2(0, categoriesHeight));
-            DrawCategoryButtons(m_Bank.Categories, ImGui::GetContentRegionAvail().x);
+            DrawCategoryButtons(m_Data.CurrentBank.Categories, ImGui::GetContentRegionAvail().x);
             ImGui::EndChild();
 
-            for (size_t i = 0; i < m_Bank.Questions.size(); ++i)
+            for (size_t i = 0; i < m_Data.CurrentBank.Questions.size(); ++i)
             {
-                auto& question = m_Bank.Questions[i];
+                auto& question = m_Data.CurrentBank.Questions[i];
                 ImGui::PushID((int)i);
 
                 if (ImGui::TreeNodeEx(("Questão " + std::to_string(i + 1)).c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_FramePadding | ImGuiTreeNodeFlags_Bullet))
@@ -419,16 +620,13 @@ namespace QB
             // Render
             // -------------------------
 
-            int width, height;
-            glfwGetFramebufferSize(m_Window, &width, &height);
-
-            glViewport(0, 0, width, height);
+            glViewport(0, 0, m_Data.Config.Width, m_Data.Config.Height);
 
             glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
 
             ImGuiIO& io    = ImGui::GetIO();
-            io.DisplaySize = ImVec2((float)width, (float)height);
+            io.DisplaySize = ImVec2((float)m_Data.Config.Width, (float)m_Data.Config.Height);
 
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -446,6 +644,116 @@ namespace QB
             glfwSwapBuffers(m_Window);
             glfwPollEvents();
         }
+    }
+
+    void Application::Init(bool p_LoadStartBank)
+    {
+        if (!glfwInit())
+        {
+            std::cerr << "Failed to initialize GLFW\n";
+            std::exit(-1);
+        }
+
+        m_Data.Config = ImportAppConfig();
+
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        glfwWindowHint(GLFW_MAXIMIZED, m_Data.Config.Maximize);
+
+        m_Window = glfwCreateWindow(
+            m_Data.Config.Width,
+            m_Data.Config.Height,
+            "QBank",
+            nullptr,
+            nullptr
+        );
+
+        if (!m_Window)
+        {
+            std::cerr << "Failed to create GLFW window\n";
+            glfwTerminate();
+            std::exit(-1);
+        }
+
+        glfwMakeContextCurrent(m_Window);
+        glfwSwapInterval(1);
+
+        if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
+        {
+            std::cerr << "Failed to initialize GLAD\n";
+
+            glfwDestroyWindow(m_Window);
+            glfwTerminate();
+            std::exit(-1);
+        }
+
+        glfwSetWindowUserPointer(m_Window, &m_Data);
+
+        glfwSetWindowSizeCallback(m_Window, [](GLFWwindow* p_Window, int p_Width, int p_Height)
+        {
+            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(p_Window);
+            data.Config.Width = p_Width;
+            data.Config.Height = p_Height;
+        });
+
+        glfwSetWindowMaximizeCallback(m_Window, [](GLFWwindow* p_Window, int p_Maximize)
+        {
+            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(p_Window);
+            data.Config.Maximize = p_Maximize == GLFW_TRUE;
+        });
+
+        glfwSetDropCallback(m_Window, [](GLFWwindow* p_Window, int p_PathCount, const char* p_Paths[])
+        {
+            if (p_PathCount <= 0)
+                return;
+
+            std::filesystem::path filepath = p_Paths[0];
+            if (filepath.extension() != ".qbank")
+                return;
+
+            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(p_Window);
+            data.CurrentBank = ImportQuestionBank(filepath.string());
+        });
+
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+
+        ImGuiIO& io = ImGui::GetIO(); (void)io;
+        io.IniFilename = nullptr;
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;       // Enable Keyboard Controls
+        //io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
+        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;           // Enable Docking
+        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;         // Enable Multi-Viewport / Platform Windows
+        io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleViewports;
+        io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleFonts;
+        io.ConfigFlags |= ImGuiConfigFlags_DpiEnableScaleViewports;
+
+        ImGui::StyleColorsDark();
+
+        ImGui_ImplGlfw_InitForOpenGL(m_Window, true);
+        ImGui_ImplOpenGL3_Init("#version 450");
+
+        auto folderPath = std::filesystem::path(FOLDER_PATH);
+        if (std::filesystem::exists(folderPath))
+        {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(folderPath))
+            {
+                if (!entry.is_regular_file())
+                    continue;
+
+                auto path = entry.path();
+                if (path.extension() != ".qbank")
+                    continue;
+
+
+                auto filepath = folderPath / std::filesystem::relative(path, folderPath);
+                m_BankNames.push_back(filepath.lexically_normal().generic_string());
+            }
+        }
+
+        if (p_LoadStartBank && !m_Data.Config.StartBank.empty() && std::filesystem::exists(m_Data.Config.StartBank))
+            m_Data.CurrentBank = ImportQuestionBank(m_Data.Config.StartBank);
     }
 
     void Application::QuestionCreation()
@@ -490,7 +798,7 @@ namespace QB
             ImGui::SetNextWindowSizeConstraints({ size.x, 50.0f }, { size.x, 150.0f });
             ImGui::BeginChild("##Categories", { 0, 0 }, true);
             {
-                std::stringstream ss(m_Bank.Categories);
+                std::stringstream ss(m_Data.CurrentBank.Categories);
                 std::string category;
                 while (std::getline(ss, category, ';'))
                 {
@@ -542,10 +850,10 @@ namespace QB
             {
                 std::string category(newCategory);
 
-                if (!m_Bank.Categories.empty())
-                    m_Bank.Categories += ';';
+                if (!m_Data.CurrentBank.Categories.empty())
+                    m_Data.CurrentBank.Categories += ';';
 
-                m_Bank.Categories     += category;
+                m_Data.CurrentBank.Categories     += category;
                 newCategory[0]         = '\0';
             }
             ImGui::SameLine();
@@ -553,10 +861,10 @@ namespace QB
             {
                 std::string category(newCategory);
 
-                if (!m_Bank.Categories.empty())
-                    m_Bank.Categories += ';';
+                if (!m_Data.CurrentBank.Categories.empty())
+                    m_Data.CurrentBank.Categories += ';';
 
-                m_Bank.Categories     += category;
+                m_Data.CurrentBank.Categories     += category;
                 newCategory[0]         = '\0';
             }
             ImGui::EndChild();
@@ -672,8 +980,6 @@ namespace QB
 
         ImGui::EndChild();
 
-        ImGui::BeginDisabled(questionText[0] == '\0' || newQuestion.CurrentOptionIndex == 0 || newQuestion.CorrectOptionIndex == -1);
-
         if (ImGui::Button("Cancelar", ImVec2(100, 0)))
         {
             questionText[0]                 = '\0';
@@ -683,6 +989,8 @@ namespace QB
             m_QuestionWindow                = false;
         }
         ImGui::SameLine();
+
+        ImGui::BeginDisabled(questionText[0] == '\0' || newQuestion.CurrentOptionIndex == 0 || newQuestion.CorrectOptionIndex == -1);
         if (ImGui::Button("Salvar", ImVec2(100, 0)))
         {
             newQuestion.Text                = questionText;
@@ -690,12 +998,11 @@ namespace QB
             questionText[0]                 = '\0';
             explanationText[0]              = '\0';
             answerText[0]                   = '\0';
-            m_Bank.Questions.push_back(newQuestion);
+            m_Data.CurrentBank.Questions.push_back(newQuestion);
 
-            newQuestion = {};
-            m_QuestionWindow = false;
+            newQuestion                     = {};
+            m_QuestionWindow                = false;
         }
-
         ImGui::EndDisabled();
 
         ImGui::End();
@@ -725,7 +1032,7 @@ namespace QB
 
                 for (size_t i = 0; i < m_Status.IncorrectQuestions.size(); ++i)
                 {
-                    auto& question = m_Bank.Questions[i];
+                    auto& question = m_Data.CurrentBank.Questions[i];
                     ImGui::PushID((int)i);
 
                     if (ImGui::TreeNodeEx(("Questão " + std::to_string(i + 1)).c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_FramePadding | ImGuiTreeNodeFlags_Bullet))
@@ -823,12 +1130,44 @@ namespace QB
         if (ImGui::Button("Fechar", ImVec2(100, 0)))
         {
             m_Status = {};
-            for (auto& question : m_Bank.Questions)
+            for (auto& question : m_Data.CurrentBank.Questions)
             {
                 question.OptionMarkedIndex = -1;
             }
             m_StatusWindow = false;
         }
+        ImGui::End();
+    }
+
+    void Application::BankExportWindow()
+    {
+        if (!m_BankExportWindow) return;
+
+        static char buffer[256] = {};
+
+        ImGui::SetNextWindowSizeConstraints({ 300, 70 }, { FLT_MAX, FLT_MAX });
+        ImGui::Begin("##BankExport", &m_BankExportWindow, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoDecoration );
+
+        ImGui::Text("Name:");
+        ImGui::InputText("##Name", buffer, sizeof(buffer), ImGuiInputTextFlags_AutoSelectAll);
+
+        if (ImGui::Button("Cancelar"))
+        {
+            m_BankExportWindow = false;
+            buffer[0]          = '\0';
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(buffer[0] == '\0');
+        if (ImGui::Button("Salvar"))
+        {
+            std::string name(buffer);
+            m_Data.CurrentBank.Name = name;
+            ExportQuestionBank(m_Data.CurrentBank);
+            m_BankExportWindow      = false;
+            buffer[0]               = '\0';
+        }
+        ImGui::EndDisabled();
+
         ImGui::End();
     }
 
