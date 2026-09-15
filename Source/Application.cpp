@@ -14,6 +14,8 @@
 #include <imgui_internal.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_opengl3.h>
+#include <stb/stb_image.h>
+#include <stb/stb_image_resize2.h>
 
 
 
@@ -21,8 +23,11 @@ namespace QB
 {
     namespace
     {
-        static constexpr float PADDING = 10.0f;
-        static constexpr const char* FOLDER_PATH = "Banks";
+        static constexpr float PADDING               = 10.0f;
+        static constexpr const char* FOLDER_PATH     = "Banks";
+        static uint32_t s_MaxImageWidth              = 2048;
+        static uint32_t s_MaxImageHeight             = 2048;
+        static constexpr float QUESTION_IMAGE_HEIGHT = 100.0f;
 
         static void  BeginDockspace(std::string p_ID, std::string p_Dockspace, bool p_MenuBar, ImGuiDockNodeFlags p_DockFlags)
         {
@@ -77,33 +82,6 @@ namespace QB
         static void  EndDockspace()
         {
             ImGui::End();
-        }
-
-        static void  DrawCategoryButtons(const std::string& categories, float p_Width)
-        {
-            std::stringstream ss(categories);
-            const ImGuiStyle& style       = ImGui::GetStyle();
-            const float spacing           = style.ItemSpacing.x; std::string category;
-            float lineWidth               = 0.0f;
-            bool first                    = true;
-            
-            while (std::getline(ss, category, ';'))
-            {
-                const ImVec2 textSize     = ImGui::CalcTextSize(category.c_str());
-                const float buttonWidth   = textSize.x + style.FramePadding.x * 2.0f;
-                const float requiredWidth = first ? buttonWidth : spacing + buttonWidth;
-                if (!first && lineWidth + requiredWidth > p_Width)
-                    lineWidth             = buttonWidth;
-                else
-                {
-                    if (!first)
-                        ImGui::SameLine();
-                    lineWidth            += requiredWidth;
-                }
-
-                ImGui::Button( category.c_str(), ImVec2(buttonWidth, 0.0f) );
-                first                     = false;
-            }
         }
 
         static void  DrawCategoryTexts(const std::string& categories, float p_Width, bool p_AddSeparator = false)
@@ -234,6 +212,7 @@ namespace QB
             char Magic[5]         = { 'Q', 'B', 'A', 'N', 'K'};
             uint32_t Version      = 1;
             size_t TotalQuestions = 0;
+            size_t TotalImages    = 0;
         };
 
         static bool  ExportQuestionBank(const Bank& p_Bank)
@@ -250,8 +229,9 @@ namespace QB
                 return false;
             }
 
-            QBHeader header;
+            QBHeader header       = {};
             header.TotalQuestions = p_Bank.Questions.size();
+            header.TotalImages    = p_Bank.Images.size();
             out.write(reinterpret_cast<const char*>(&header), sizeof(header));
 
             WriteString(out, p_Bank.Categories);
@@ -263,6 +243,7 @@ namespace QB
                 WriteString(out, question.Explanation);
                 WriteString(out, question.Categories);
                 WriteString(out, question.CorrectOptionText);
+                out.write(reinterpret_cast<const char*>(&question.Image), sizeof(question.Image));
                 out.write(reinterpret_cast<const char*>(&question.CorrectOptionIndex), sizeof(question.CorrectOptionIndex));
                 out.write(reinterpret_cast<const char*>(&question.CurrentOptionIndex), sizeof(question.CurrentOptionIndex));
 
@@ -270,6 +251,31 @@ namespace QB
                 {
                     WriteString(out, question.Options[j]);
                 }
+            }
+
+            for (auto& [id, image] : p_Bank.Images)
+            {
+                out.write(reinterpret_cast<const char*>(&id), sizeof(id));
+
+                bool hasData     = image != nullptr;
+                out.write(reinterpret_cast<const char*>(&hasData), sizeof(hasData));
+                if (!hasData) continue;
+
+                auto spec        = image->GetSpecification();
+
+                out.write(reinterpret_cast<const char*>(&spec.Width),     sizeof(spec.Width));
+                out.write(reinterpret_cast<const char*>(&spec.Height),    sizeof(spec.Height));
+                out.write(reinterpret_cast<const char*>(&spec.Format),    sizeof(spec.Format));
+                out.write(reinterpret_cast<const char*>(&spec.MinFilter), sizeof(spec.MinFilter));
+                out.write(reinterpret_cast<const char*>(&spec.MagFilter), sizeof(spec.MagFilter));
+                out.write(reinterpret_cast<const char*>(&spec.WrapU),     sizeof(spec.WrapU));
+                out.write(reinterpret_cast<const char*>(&spec.WrapV),     sizeof(spec.WrapV));
+
+                auto textureData = image->GetData();
+                size_t dataSize  = textureData.size();
+
+                out.write(reinterpret_cast<const char*>(&dataSize), sizeof(dataSize));
+                out.write(reinterpret_cast<const char*>(textureData.data()), dataSize);
             }
 
             return true;
@@ -299,6 +305,7 @@ namespace QB
                 question.Explanation       = ReadString(in);
                 question.Categories        = ReadString(in);
                 question.CorrectOptionText = ReadString(in);
+                in.read(reinterpret_cast<char*>(&question.Image), sizeof(question.Image));
                 in.read(reinterpret_cast<char*>(&question.CorrectOptionIndex), sizeof(question.CorrectOptionIndex));
                 in.read(reinterpret_cast<char*>(&question.CurrentOptionIndex), sizeof(question.CurrentOptionIndex));
 
@@ -309,6 +316,33 @@ namespace QB
                     if (question.CorrectOptionText == question.Options[j])
                         question.CorrectOptionIndex = j;
                 }
+            }
+
+            for (size_t i = 0; i < header.TotalImages; i++)
+            {
+                uint64_t id = 0;
+                in.read(reinterpret_cast<char*>(&id), sizeof(id));
+
+                bool hasData = false;
+                in.read(reinterpret_cast<char*>(&hasData), sizeof(hasData));
+                if (!hasData) continue;
+
+                ImageSpecification spec = {};
+                in.read(reinterpret_cast<char*>(&spec.Width), sizeof(spec.Width));
+                in.read(reinterpret_cast<char*>(&spec.Height), sizeof(spec.Height));
+                in.read(reinterpret_cast<char*>(&spec.Format), sizeof(spec.Format));
+                in.read(reinterpret_cast<char*>(&spec.MinFilter), sizeof(spec.MinFilter));
+                in.read(reinterpret_cast<char*>(&spec.MagFilter), sizeof(spec.MagFilter));
+                in.read(reinterpret_cast<char*>(&spec.WrapU), sizeof(spec.WrapU));
+                in.read(reinterpret_cast<char*>(&spec.WrapV), sizeof(spec.WrapV));
+
+                size_t dataSize = 0;
+                in.read(reinterpret_cast<char*>(&dataSize), sizeof(dataSize));
+
+                std::vector<uint8_t> textureData(dataSize);
+                in.read(reinterpret_cast<char*>(textureData.data()), dataSize);
+
+                bank.Images[id] = Image::Create(spec, textureData.data(), dataSize);
             }
 
             return bank;
@@ -367,6 +401,147 @@ namespace QB
             return config;
         }
 
+        uint8_t* LoadImageFromFile(const char* p_Path, uint32_t* p_Width, uint32_t* p_Height, uint32_t* p_Channels, uint32_t* p_Bytes, bool* p_IsHDR, bool p_FlipY)
+        {
+            stbi_set_flip_vertically_on_load(p_FlipY);
+
+            int texWidth = 0, texHeight = 0, texChannels = 0;
+            stbi_uc* pixels   = nullptr;
+            int sizeOfChannel = 8;
+            if (stbi_is_hdr(p_Path))
+            {
+                sizeOfChannel = 32;
+                pixels        = (uint8_t*)stbi_loadf(p_Path, &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+                if (p_IsHDR)
+                    *p_IsHDR  = true;
+            }
+            else
+            {
+                pixels        = stbi_load(p_Path, &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+                if (p_IsHDR)
+                    *p_IsHDR  = false;
+            }
+
+            if (!p_IsHDR && s_MaxImageWidth > 0 && s_MaxImageHeight > 0 && ((uint32_t)texWidth > s_MaxImageWidth || (uint32_t)texHeight > s_MaxImageHeight))
+            {
+                uint32_t texWidthOld = texWidth, texHeightOld = texHeight;
+                float aspectRatio    = static_cast<float>(texWidth) / static_cast<float>(texHeight);
+                if ((uint32_t)texWidth > s_MaxImageWidth)
+                {
+                    texWidth         = s_MaxImageWidth;
+                    texHeight        = static_cast<uint32_t>(s_MaxImageWidth / aspectRatio);
+                }
+                if ((uint32_t)texHeight > s_MaxImageHeight)
+                {
+                    texHeight        = s_MaxImageHeight;
+                    texWidth         = static_cast<uint32_t>(s_MaxImageHeight * aspectRatio);
+                }
+
+                int resizedChannels    = texChannels;
+                uint8_t* resizedPixels = (stbi_uc*)malloc(texWidth * texHeight * resizedChannels);
+
+                if (p_IsHDR)
+                    stbir_resize_float_linear((float*)pixels, texWidthOld, texHeightOld, 0, (float*)resizedPixels, texWidth, texHeight, 0, STBIR_RGBA);
+                else
+                    stbir_resize_uint8_linear(pixels, texWidthOld, texHeightOld, 0, resizedPixels, texWidth, texHeight, 0, STBIR_RGBA);
+
+                free(pixels);
+                pixels = resizedPixels;
+            }
+
+            if (!pixels)
+            {
+                std::cerr << "Could not load image '" << p_Path << "'!\n";
+
+                texChannels = 4;
+
+                if (p_Width)    *p_Width    = 2;
+                if (p_Height)   *p_Height   = 2;
+                if (p_Bytes)    *p_Bytes    = sizeOfChannel / 8;
+                if (p_Channels) *p_Channels = texChannels;
+
+                const int32_t size          = (*p_Width) * (*p_Height) * texChannels;
+                uint8_t* data               = new uint8_t[size];
+
+                uint8_t datatwo[16] = {
+                    255, 0  , 255, 255,
+                    0,   0  , 0,   255,
+                    0,   0  , 0,   255,
+                    255, 0  , 255, 255
+                };
+
+                memcpy(data, datatwo, size);
+
+                return data;
+            }
+
+            if (texChannels != 4)
+                texChannels = 4;
+
+            if (p_Width)    *p_Width    = texWidth;
+            if (p_Height)   *p_Height   = texHeight;
+            if (p_Bytes)    *p_Bytes    = sizeOfChannel / 8;
+            if (p_Channels) *p_Channels = texChannels;
+
+            const uint64_t size         = uint64_t(texWidth) * uint64_t(texHeight) * uint64_t(texChannels) * uint64_t(sizeOfChannel / 8U);
+            uint8_t* result             = new uint8_t[size];
+            memcpy(result, pixels, size);
+
+            stbi_image_free(pixels);
+            return result;
+        }
+
+        std::shared_ptr<Image> LoadImage(const std::string& p_Path)
+        {
+            uint32_t width, height, channels = 4, bytes = 1;
+            bool isHDR    = false;
+            uint8_t* data = LoadImageFromFile(p_Path.c_str(), &width, &height, &channels, &bytes, &isHDR, false);
+
+            ImageSpecification spec = {};
+            spec.Width              = width;
+            spec.Height             = height;
+            spec.Format             = (isHDR) ? TextureFormat::RGBA32_FLOAT : TextureFormat::RGBA8;
+
+            uint64_t imageSize      = uint64_t(width) * uint64_t(height) * uint64_t(channels) * uint64_t(bytes);
+            auto texture            = Image::Create(spec, data, imageSize);
+            if (!texture)
+            {
+                std::cerr << "Failed to create texture!\n";
+                free(data);
+                return nullptr;
+            }
+
+            free(data);
+            return texture;
+        }
+
+        static uint64_t HashString(std::string_view p_Str)
+        {
+            uint64_t hash = 14695981039346656037ull;
+
+            for (char c : p_Str)
+            {
+                hash ^= (uint64_t)c;
+                hash *= 1099511628211ull;
+            }
+
+            return hash;
+        }
+
+        template <typename T>
+        static void HashCombine(std::size_t& p_Seed, const T& p_Value)
+        {
+            std::hash<T> hasher;
+            p_Seed ^= hasher(p_Value) + 0x9e3779b9 + (p_Seed << 6) + (p_Seed >> 2);
+        }
+
+        template <typename T, typename... Rest>
+        static void HashCombine(std::size_t& p_Seed, const T& p_Value, const Rest&... p_Rest)
+        {
+            HashCombine(p_Seed, p_Value);
+            (HashCombine(p_Seed, p_Rest), ...);
+        }
+
     } // namespace
 
     Application::Application()
@@ -413,6 +588,8 @@ namespace QB
         m_Data.Config.StartBank      = m_Data.CurrentBank.Name.empty() ? "" : (folder / (m_Data.CurrentBank.Name + ".qbank")).lexically_normal().generic_string();
         ExportAppConfig(m_Data.Config);
 
+        m_ExternalDragDrop.Shutdown();
+
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();
 
@@ -426,13 +603,16 @@ namespace QB
     {
         while (!glfwWindowShouldClose(m_Window))
         {
-            // -------------------------
-            // New ImGui frame
-            // -------------------------
+            glfwPollEvents();
 
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
+
+            if (m_ExternalDragDrop.BeginSource())
+            {
+                m_ExternalDragDrop.EndSource();
+            }
 
             // -------------------------
             // UI
@@ -527,92 +707,13 @@ namespace QB
                 ImGui::EndMenuBar();
             }
 
-            QuestionCreation();
+            QuestionWindow();
 
             BankExportWindow();
 
             StatusWindow();
 
-            ImGui::SetNextWindowDockID(ImGui::GetID("MyDockspace"), ImGuiCond_Once);
-            ImGui::Begin("QBank");
-
-            float categoriesHeight = CalculateCategoryButtonsHeight(m_Data.CurrentBank.Categories, ImGui::GetContentRegionAvail().x);
-            ImGui::BeginChild("Categories", ImVec2(0, categoriesHeight));
-            DrawCategoryButtons(m_Data.CurrentBank.Categories, ImGui::GetContentRegionAvail().x);
-            ImGui::EndChild();
-
-            for (size_t i = 0; i < m_Data.CurrentBank.Questions.size(); ++i)
-            {
-                auto& question = m_Data.CurrentBank.Questions[i];
-                ImGui::PushID((int)i);
-
-                if (ImGui::TreeNodeEx(("Questão " + std::to_string(i + 1)).c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_FramePadding | ImGuiTreeNodeFlags_Bullet))
-                {
-                    float questionDetailsHeight  = CalculateQuestionDetailsHeight(question, ImGui::GetContentRegionAvail().x);
-                    ImGui::BeginChild("QuestionDetails", ImVec2(0, questionDetailsHeight), true);
-                    {
-                        DrawCategoryButtons(question.Categories, ImGui::GetContentRegionAvail().x);
-
-                        float questionInfoHeight = CalculateWrappedTextHeight(question.Text, ImGui::GetContentRegionAvail().x, PADDING);
-                        ImGui::BeginChild("QuestionInfo", ImVec2(0, questionInfoHeight), true);
-
-                        ImGui::SetCursorPos(ImVec2(PADDING, PADDING));
-                        ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x - PADDING);
-                        ImGui::TextUnformatted(question.Text.c_str());
-                        ImGui::PopTextWrapPos();
-
-                        ImGui::EndChild();
-
-                        if (ImGui::BeginTable("AnswerOptions", 3, ImGuiTableFlags_SizingStretchProp))
-                        {
-                            ImGui::TableSetupColumn("A", ImGuiTableColumnFlags_WidthStretch);
-                            ImGui::TableSetupColumn("B", ImGuiTableColumnFlags_WidthStretch);
-                            ImGui::TableSetupColumn("C", ImGuiTableColumnFlags_WidthStretch);
-
-                            const int optionCount = question.CurrentOptionIndex;
-                            for (int i = 0; i < optionCount; i += 3)
-                            {
-                                ImGui::TableNextRow();
-
-                                for (size_t column = 0; column < 3; column++)
-                                {
-                                    const size_t optionIndex = i + column;
-
-                                    ImGui::TableNextColumn();
-
-                                    if (optionIndex >= optionCount)
-                                        continue;
-
-                                    auto index = static_cast<int>(optionIndex);
-                                    ImGui::PushID(index);
-
-                                    bool marked = question.OptionMarkedIndex == index;
-                                    if (ImGui::Checkbox("", &marked))
-                                    {
-                                        question.OptionMarkedIndex = question.OptionMarkedIndex == index ? -1 : index;
-                                    }
-                                    ImGui::SameLine();
-                                    ImGui::Text("(%c)", 'A' + static_cast<char>(optionIndex));
-                                    ImGui::SameLine();
-                                    ImGui::PushTextWrapPos();
-                                    ImGui::TextUnformatted(question.Options[optionIndex].c_str());
-                                    ImGui::PopTextWrapPos();
-
-                                    ImGui::PopID();
-                                }
-                            }
-                            ImGui::EndTable();
-                        }
-                    }
-                    ImGui::EndChild();
-
-                    ImGui::TreePop();
-                }
-
-                ImGui::PopID();
-            }
-
-            ImGui::End();
+            MainWindow();
 
             EndDockspace();
 
@@ -641,8 +742,8 @@ namespace QB
                 glfwMakeContextCurrent(backup_current_context);
             }
 
+            m_ExternalDragDrop.EndFrame();
             glfwSwapBuffers(m_Window);
-            glfwPollEvents();
         }
     }
 
@@ -754,33 +855,248 @@ namespace QB
 
         if (p_LoadStartBank && !m_Data.Config.StartBank.empty() && std::filesystem::exists(m_Data.Config.StartBank))
             m_Data.CurrentBank = ImportQuestionBank(m_Data.Config.StartBank);
+
+        m_ExternalDragDrop.Initialize(m_Window);
+
+        uint32_t whiteTextureData = 0xffffffff;
+        m_WhiteImage              = Image::Create({}, (uint8_t*)&whiteTextureData, sizeof(uint32_t));
     }
 
-    void Application::QuestionCreation()
+    void Application::QuestionWindow()
     {
-        if (!m_QuestionWindow) return;
+        static bool wasQuestionWindowOpen = false;
 
-        static Question newQuestion       = {};
+        static Question question          = {};
         static char questionText[1024]    = {};
         static char explanationText[1024] = {};
-        static char answerText[256] = {};
+        static char answerText[256]       = {};
+
+        const bool justOpened = m_QuestionWindow && !wasQuestionWindowOpen;
+        if (!m_QuestionWindow)
+        {
+            wasQuestionWindowOpen = false;
+            return;
+        }
+
+        if (justOpened)
+        {
+            question = {};
+
+            std::memset(questionText, 0, sizeof(questionText));
+            std::memset(explanationText, 0, sizeof(explanationText));
+            std::memset(answerText, 0, sizeof(answerText));
+
+            if (m_QuestionToEdit >= 0 && m_QuestionToEdit < static_cast<int>(m_Data.CurrentBank.Questions.size()))
+            {
+                question = m_Data.CurrentBank.Questions[m_QuestionToEdit];
+
+                std::snprintf(questionText, sizeof(questionText), "%s", question.Text.c_str());
+                std::snprintf(explanationText, sizeof(explanationText), "%s", question.Explanation.c_str());
+
+                // Make sure CurrentOptionIndex is valid.
+                question.CurrentOptionIndex = std::clamp(question.CurrentOptionIndex, 0, static_cast<int>(question.Options.size()));
+                if (question.CurrentOptionIndex == 0)
+                {
+                    while (question.CurrentOptionIndex < static_cast<int>(question.Options.size()) && !question.Options[question.CurrentOptionIndex].empty())
+                    {
+                        question.CurrentOptionIndex++;
+                    }
+                }
+
+                if (question.CorrectOptionIndex < -1 || question.CorrectOptionIndex >= question.CurrentOptionIndex)
+                    question.CorrectOptionIndex = -1;
+
+                if (question.CorrectOptionIndex >= 0)
+                    question.CorrectOptionText = question.Options[question.CorrectOptionIndex];
+                else
+                    question.CorrectOptionText.clear();
+            }
+            else
+            {
+                question.CurrentOptionIndex = 0;
+                question.CorrectOptionIndex = -1;
+            }
+        }
+
 
         ImGui::SetNextWindowSizeConstraints({ 400, 500 }, { FLT_MAX, FLT_MAX });
         ImGui::Begin("##QuestionEditor", &m_QuestionWindow, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse);
 
         ImGui::BeginChild("##Child", ImVec2(0, ImGui::GetContentRegionAvail().y - 23.0f), true);
-        const float width                 = ImGui::GetContentRegionAvail().x;
+        const float width = ImGui::GetContentRegionAvail().x;
+
+        const ImVec2 buttonSize = { width, 100.0f };
+        ImGui::BeginGroup();
+        {
+            std::shared_ptr<Image> image = m_WhiteImage;
+            if (question.Image > 0)
+            {
+                auto it = m_Data.CurrentBank.Images.find(question.Image);
+                if (it != m_Data.CurrentBank.Images.end() && it->second)
+                    image = it->second;
+            }
+
+            ImGui::PushID("QuestionImage");
+
+            const ImVec2 cursor = ImGui::GetCursorScreenPos();
+            const bool clicked  = ImGui::InvisibleButton("##ImageButton", buttonSize);
+            const bool hovered  = ImGui::IsItemHovered();
+            const bool active   = ImGui::IsItemActive();
+
+            if (clicked)
+            {
+                std::string path;
+
+                if (FileDialog::Open({ { "Images", "*" } }, "", path) == FileDialogResult::SUCCESS)
+                {
+                    const auto hash                 = HashString(path);
+                    m_Data.CurrentBank.Images[hash] = LoadImage(path);
+                    question.Image                  = hash;
+                }
+            }
+
+            ImDrawList* drawList  = ImGui::GetWindowDrawList();
+
+            ImU32 backgroundColor = IM_COL32(30, 30, 30, 255);
+            if (hovered)
+                backgroundColor   = IM_COL32(45, 45, 45, 255);
+            if (active)
+                backgroundColor   = IM_COL32(60, 60, 60, 255);
+
+            drawList->AddRectFilled(
+                cursor,
+                cursor + buttonSize,
+                backgroundColor,
+                4.0f
+            );
+
+            const float imageWidth  = static_cast<float>(image->GetWidth());
+            const float imageHeight = static_cast<float>(image->GetHeight());
+
+            if (imageWidth > 0.0f && imageHeight > 0.0f)
+            {
+                const float imageAspect    = imageWidth / imageHeight;
+                const float viewportAspect = buttonSize.x / buttonSize.y;
+
+                ImVec2 imageSize;
+                if (viewportAspect > imageAspect)
+                {
+                    imageSize.y = buttonSize.y;
+                    imageSize.x = imageSize.y * imageAspect;
+                }
+                else
+                {
+                    imageSize.x = buttonSize.x;
+                    imageSize.y = imageSize.x / imageAspect;
+                }
+
+                const ImVec2 imagePos = {
+                    cursor.x + (buttonSize.x - imageSize.x) * 0.5f,
+                    cursor.y + (buttonSize.y - imageSize.y) * 0.5f
+                };
+
+                drawList->AddImage(
+                    (ImTextureID)image->GetID(),
+                    imagePos,
+                    imagePos + imageSize
+                );
+
+                if (question.Image == 0)
+                {
+                    const std::string text = "Arraste ou selecione uma imagem!";
+
+                    drawList->AddRectFilled(
+                        imagePos,
+                        imagePos + imageSize,
+                        IM_COL32(0, 0, 0, hovered ? 120 : 90),
+                        4.0f
+                    );
+
+                    const float lineHeight = ImGui::GetTextLineHeight();
+                    const float y          = imagePos.y + (imageSize.y - lineHeight) * 0.5f;
+
+                    const ImVec2 textSize  = ImGui::CalcTextSize(text.c_str());
+                    const float x          = imagePos.x + (imageSize.x - textSize.x) * 0.5f;
+
+                    drawList->AddText(
+                        ImVec2(x, y),
+                        IM_COL32(255, 255, 255, 255),
+                        text.c_str()
+                    );
+                }
+            }
+
+            if (hovered)
+            {
+                drawList->AddRect(
+                    cursor,
+                    cursor + buttonSize,
+                    active ? IM_COL32(255, 255, 255, 220) : IM_COL32(255, 255, 255, 150),
+                    4.0f,
+                    0,
+                    active ? 2.0f : 1.0f
+                );
+            }
+            else
+            {
+                drawList->AddRect(
+                    cursor,
+                    cursor + buttonSize,
+                    IM_COL32(100, 100, 100, 180),
+                    4.0f
+                );
+            }
+
+            ImGui::PopID();
+        }
+        ImGui::EndGroup();
+
+        if (ImGui::BeginDragDropTarget())
+        {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(ExternalDragDrop::PayloadType))
+            {
+                const auto& files = m_ExternalDragDrop.GetPaths();
+
+                for (const auto& file : files)
+                {
+                    const std::string path = file.string();
+                    const auto hash = HashString(path);
+
+                    m_Data.CurrentBank.Images[hash] = LoadImage(path);
+                    question.Image = hash;
+
+                    // One image is enough for this question.
+                    break;
+                }
+            }
+
+            ImGui::EndDragDropTarget();
+        }
+
 
         ImGui::Text("Texto da Questão:");
-        ImGui::InputTextMultiline("##Text", questionText, sizeof(questionText), ImVec2(width, 50.0f), ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_WordWrap);
-        ImGui::Text("Explicação:");
-        ImGui::InputTextMultiline("##Explanation", explanationText, sizeof(explanationText), ImVec2(width, 50.0f), ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_WordWrap);
+        ImGui::InputTextMultiline(
+            "##Text",
+            questionText,
+            sizeof(questionText),
+            ImVec2(width, 50.0f),
+            ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_WordWrap
+        );
 
-        float lineCount                   = (float)std::max(CalculateCategoryLineCount(newQuestion.Categories, width), 1);
-        float textHeight                  = lineCount * ImGui::GetTextLineHeight() + (lineCount - 1.0f + 4.0f) * ImGui::GetStyle().ItemSpacing.y;
+        ImGui::Text("Explicação:");
+        ImGui::InputTextMultiline(
+            "##Explanation",
+            explanationText,
+            sizeof(explanationText),
+            ImVec2(width, 50.0f),
+            ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_WordWrap
+        );
+
+        const float lineCount  = static_cast<float>(std::max(CalculateCategoryLineCount(question.Categories, width), 1));
+        const float textHeight = lineCount * ImGui::GetTextLineHeight() + (lineCount - 1.0f + 4.0f) * ImGui::GetStyle().ItemSpacing.y;
 
         ImGui::BeginChild("##NewQuestionCategories", { 0, textHeight }, true);
-        DrawCategoryTexts(newQuestion.Categories, width, true);
+        DrawCategoryTexts(question.Categories, width, true);
         ImGui::EndChild();
 
         if (ImGui::Button("Adicionar Categoria"))
@@ -788,85 +1104,170 @@ namespace QB
 
         if (ImGui::BeginPopup("CategorySelector"))
         {
-            static char buffer[128]      = {};
-            static char newCategory[128] = {};
+            static char searchBuffer[128] = {};
+            static char newCategory[128]  = {};
 
             ImGui::Text("Search:");
-            ImGui::InputText("##Search", buffer, sizeof(buffer), ImGuiInputTextFlags_AutoSelectAll);
+            ImGui::InputText(
+                "##Search",
+                searchBuffer,
+                sizeof(searchBuffer),
+                ImGuiInputTextFlags_AutoSelectAll
+            );
 
-            auto size = ImGui::GetContentRegionAvail();
+            auto toLower = [](std::string value)
+            {
+                std::transform(value.begin(), value.end(), value.begin(), [](unsigned char p_Char)
+                {
+                    return static_cast<char>(std::tolower(p_Char));
+                });
+
+                return value;
+            };
+
+            const std::string search = toLower(searchBuffer);
+            auto hasCategory = [&](const std::string& category)
+            {
+                std::stringstream ss(question.Categories);
+                std::string current;
+
+                while (std::getline(ss, current, ';'))
+                {
+                    if (current == category)
+                        return true;
+                }
+
+                return false;
+            };
+
+            auto addCategory = [&](const std::string& category)
+            {
+                if (category.empty())
+                    return;
+
+                std::stringstream ss(question.Categories);
+                std::string current;
+
+                while (std::getline(ss, current, ';'))
+                {
+                    if (current == category)
+                        return;
+                }
+
+                if (!question.Categories.empty())
+                    question.Categories += ';';
+
+                question.Categories += category;
+            };
+
+            auto removeCategory = [&](const std::string& category)
+            {
+                std::stringstream ss(question.Categories);
+
+                std::string current;
+                std::string result;
+
+                while (std::getline(ss, current, ';'))
+                {
+                    if (current == category)
+                        continue;
+
+                    if (!result.empty())
+                        result += ';';
+
+                    result += current;
+                }
+
+                question.Categories = std::move(result);
+            };
+
+            const auto size = ImGui::GetContentRegionAvail();
             ImGui::SetNextWindowSizeConstraints({ size.x, 50.0f }, { size.x, 150.0f });
             ImGui::BeginChild("##Categories", { 0, 0 }, true);
             {
                 std::stringstream ss(m_Data.CurrentBank.Categories);
                 std::string category;
+
                 while (std::getline(ss, category, ';'))
                 {
-                    if (buffer[0] != '\0')
+                    if (!search.empty())
                     {
-                        std::string nameLower = category;
-                        std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
-
-                        char bufferLower[128];
-                        strncpy_s(bufferLower, buffer, sizeof(bufferLower));
-                        std::transform(bufferLower, bufferLower + sizeof(bufferLower), bufferLower, ::tolower);
-
-                        if (nameLower.find(bufferLower) == std::string::npos)
-                            continue; // Skip if the name does not match the search
+                        const std::string categoryLower = toLower(category);
+                        if (categoryLower.find(search) == std::string::npos)
+                        {
+                            continue;
+                        }
                     }
 
-                    bool hasCategory                    = newQuestion.Categories.find(category) != std::string::npos;
-                    if (ImGui::Selectable(category.c_str(), hasCategory))
+                    const bool selected = hasCategory(category);
+                    if (ImGui::Selectable(category.c_str(), selected))
                     {
-                        if (!hasCategory)
-                        {
-                            if (!newQuestion.Categories.empty())
-                                newQuestion.Categories += ';';
-
-                            newQuestion.Categories     += category;
-                        }
+                        if (selected)
+                            removeCategory(category);
                         else
-                        {
-                            std::stringstream categories(newQuestion.Categories);
-                            std::string result;
-                            std::string current;
-                            while (std::getline(categories, current, ';'))
-                            {
-                                if (current == category)
-                                    continue;
-                                if (!result.empty()) result += ';';
-                                result += current;
-                            }
-                            newQuestion.Categories = std::move(result);
-                        }
-                        buffer[0] = '\0';
+                            addCategory(category);
+
+                        searchBuffer[0] = '\0';
                         ImGui::CloseCurrentPopup();
                     }
                 }
             }
+
             ImGui::EndChild();
-            ImGui::BeginChild("##AddCategory", { 0, ImGui::GetFrameHeight() + 4 * ImGui::GetStyle().ItemSpacing.y }, true);
-            if (ImGui::InputText("##Category", newCategory, sizeof(newCategory), ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EnterReturnsTrue))
+
+            ImGui::BeginChild("##AddCategory", {0, ImGui::GetFrameHeight() + 4 * ImGui::GetStyle().ItemSpacing.y }, true);
+
+            auto createCategory = [&]()
             {
                 std::string category(newCategory);
 
-                if (!m_Data.CurrentBank.Categories.empty())
-                    m_Data.CurrentBank.Categories += ';';
+                if (category.empty())
+                    return;
 
-                m_Data.CurrentBank.Categories     += category;
-                newCategory[0]         = '\0';
+                // Add to bank only if it does not already exist.
+                bool exists = false;
+
+                {
+                    std::stringstream ss(m_Data.CurrentBank.Categories);
+                    std::string current;
+
+                    while (std::getline(ss, current, ';'))
+                    {
+                        if (current == category)
+                        {
+                            exists = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!exists)
+                {
+                    if (!m_Data.CurrentBank.Categories.empty())
+                        m_Data.CurrentBank.Categories += ';';
+
+                    m_Data.CurrentBank.Categories += category;
+                }
+
+                addCategory(category);
+
+                newCategory[0] = '\0';
+            };
+
+            if (ImGui::InputText(
+                "##Category",
+                newCategory,
+                sizeof(newCategory),
+                ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EnterReturnsTrue))
+            {
+                createCategory();
             }
+
             ImGui::SameLine();
+
             if (ImGui::Button(" + "))
-            {
-                std::string category(newCategory);
+                createCategory();
 
-                if (!m_Data.CurrentBank.Categories.empty())
-                    m_Data.CurrentBank.Categories += ';';
-
-                m_Data.CurrentBank.Categories     += category;
-                newCategory[0]         = '\0';
-            }
             ImGui::EndChild();
 
             ImGui::EndPopup();
@@ -874,75 +1275,90 @@ namespace QB
 
         ImGui::BeginChild("##Answers", { 0, 0 }, true);
 
-        if (ImGui::InputText("##NewAnswer", answerText, sizeof(answerText), ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EnterReturnsTrue))
+        if (ImGui::InputText(
+            "##NewAnswer",
+            answerText,
+            sizeof(answerText),
+            ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EnterReturnsTrue))
         {
-            if (newQuestion.CurrentOptionIndex < 26)
+            if (question.CurrentOptionIndex < static_cast<int>(question.Options.size()))
             {
-                std::string answer(answerText);
-                newQuestion.Options[newQuestion.CurrentOptionIndex] = answer;
-                newQuestion.CurrentOptionIndex++;
+                question.Options[question.CurrentOptionIndex] = answerText;
+                question.CurrentOptionIndex++;
             }
+
             answerText[0] = '\0';
         }
+
         ImGui::SameLine();
+
         if (ImGui::Button(" + "))
         {
-            if (newQuestion.CurrentOptionIndex < 26)
+            if (question.CurrentOptionIndex < static_cast<int>(question.Options.size()))
             {
-                std::string answer(answerText);
-                newQuestion.Options[newQuestion.CurrentOptionIndex] = answer;
-                newQuestion.CurrentOptionIndex++;
+                question.Options[question.CurrentOptionIndex] = answerText;
+                question.CurrentOptionIndex++;
             }
+
             answerText[0] = '\0';
         }
 
         std::vector<int> questionsToDelete;
-
         if (ImGui::BeginTable("AnswerOptions", 3, ImGuiTableFlags_SizingStretchProp))
         {
             ImGui::TableSetupColumn("A", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("B", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("C", ImGuiTableColumnFlags_WidthStretch);
 
-            const int optionCount = newQuestion.CurrentOptionIndex;
+            const int optionCount = std::clamp(question.CurrentOptionIndex, 0, static_cast<int>(question.Options.size()));
             for (int i = 0; i < optionCount; i += 3)
             {
                 ImGui::TableNextRow();
 
-                for (size_t column = 0; column < 3; column++)
+                for (int column = 0; column < 3; column++)
                 {
-                    const size_t optionIndex = i + column;
+                    const int optionIndex = i + column;
 
                     ImGui::TableNextColumn();
 
                     if (optionIndex >= optionCount)
                         continue;
 
-                    auto index = static_cast<int>(optionIndex);
-                    ImGui::PushID(index);
+                    ImGui::PushID(optionIndex);
 
-                    bool marked = newQuestion.CorrectOptionIndex == index;
-                    if (ImGui::Checkbox("", &marked))
+                    bool marked = question.CorrectOptionIndex == optionIndex;
+                    if (ImGui::Checkbox("##Correct", &marked))
                     {
-                        newQuestion.CorrectOptionIndex = newQuestion.CorrectOptionIndex == index ? -1 : index;
-                        if (newQuestion.CorrectOptionIndex != -1)
-                            newQuestion.CorrectOptionText = newQuestion.Options[newQuestion.CorrectOptionIndex];
+                        if (marked)
+                        {
+                            question.CorrectOptionIndex = optionIndex;
+                            question.CorrectOptionText  = question.Options[optionIndex];
+                        }
+                        else
+                        {
+                            question.CorrectOptionIndex = -1;
+                            question.CorrectOptionText.clear();
+                        }
                     }
+
                     ImGui::SameLine();
 
                     if (marked)
+                    {
                         ImGui::PushStyleColor(ImGuiCol_Text, { 0.0f, 1.0f, 0.0f, 1.0f });
+                    }
 
                     ImGui::Text("(%c)", 'A' + static_cast<char>(optionIndex));
                     ImGui::SameLine();
+
                     ImGui::PushTextWrapPos();
-                    ImGui::TextUnformatted(newQuestion.Options[optionIndex].c_str());
+                    ImGui::TextUnformatted(question.Options[optionIndex].c_str());
                     ImGui::PopTextWrapPos();
+
                     ImGui::SameLine();
+
                     if (ImGui::SmallButton("X"))
-                    {
-                        questionsToDelete.push_back(index);
-                    }
+                        questionsToDelete.push_back(optionIndex);
 
                     if (marked)
                         ImGui::PopStyleColor();
@@ -950,30 +1366,76 @@ namespace QB
                     ImGui::PopID();
                 }
             }
+
             ImGui::EndTable();
+        }
 
-            if (!questionsToDelete.empty())
+        if (!questionsToDelete.empty())
+        {
+            std::sort(questionsToDelete.begin(), questionsToDelete.end());
+            questionsToDelete.erase(std::unique(questionsToDelete.begin(), questionsToDelete.end()), questionsToDelete.end());
+
+            const int oldCorrectIndex              = question.CorrectOptionIndex;
+            const int oldCount                     = question.CurrentOptionIndex;
+
+            std::array<std::string, 26> oldOptions = question.Options;
+
+            question.Options.fill("");
+            question.CurrentOptionIndex            = 0;
+            question.CorrectOptionIndex            = -1;
+            question.CorrectOptionText.clear();
+
+            int newCorrectIndex                    = -1;
+            for (int oldIndex = 0; oldIndex < oldCount; oldIndex++)
             {
-                std::array<std::string, 26> options = newQuestion.Options;
-                const int count                     = newQuestion.CurrentOptionIndex;
-                newQuestion.Options.fill("");
-                newQuestion.CurrentOptionIndex      = 0;
+                const bool deleted         = std::binary_search(questionsToDelete.begin(), questionsToDelete.end(), oldIndex);
+                if (deleted)
+                    continue;
 
-                for (auto& index : questionsToDelete)
+                const int newIndex         = question.CurrentOptionIndex;
+                question.Options[newIndex] = oldOptions[oldIndex];
+
+                question.CurrentOptionIndex++;
+
+                if (oldIndex == oldCorrectIndex)
                 {
-                    for (int i = 0; i < count; i++)
-                    {
-                        if (i == index)
-                            continue;
-
-                        newQuestion.Options[newQuestion.CurrentOptionIndex] = options[i];
-                        newQuestion.CurrentOptionIndex++;
-                    }
+                    // The correct answer itself was deleted.
+                    newCorrectIndex        = -1;
                 }
-
-                questionsToDelete.clear();
+                else if (oldCorrectIndex >= 0 && oldIndex < oldCorrectIndex)
+                {
+                    // The correct answer moved one position left.
+                    if (newCorrectIndex >= 0)
+                        newCorrectIndex--;
+                }
             }
 
+            // Recalculate the correct index more robustly.
+            if (oldCorrectIndex >= 0)
+            {
+                bool correctWasDeleted     = std::binary_search(questionsToDelete.begin(), questionsToDelete.end(), oldCorrectIndex);
+                if (!correctWasDeleted)
+                {
+                    int shift              = 0;
+                    for (int deletedIndex : questionsToDelete)
+                    {
+                        if (deletedIndex < oldCorrectIndex)
+                            shift++;
+                    }
+
+                    newCorrectIndex        = oldCorrectIndex - shift;
+                }
+                else
+                {
+                    newCorrectIndex        = -1;
+                }
+            }
+
+            question.CorrectOptionIndex    = newCorrectIndex;
+            if (newCorrectIndex >= 0)
+            {
+                question.CorrectOptionText = question.Options[newCorrectIndex];
+            }
         }
 
         ImGui::EndChild();
@@ -982,37 +1444,75 @@ namespace QB
 
         if (ImGui::Button("Cancelar", ImVec2(100, 0)))
         {
-            questionText[0]                 = '\0';
-            explanationText[0]              = '\0';
-            answerText[0]                   = '\0';
-            newQuestion                     = {};
-            m_QuestionWindow                = false;
+            question           = {};
+
+            questionText[0]    = '\0';
+            explanationText[0] = '\0';
+            answerText[0]      = '\0';
+
+            m_QuestionToEdit   = -1;
+            m_QuestionWindow   = false;
         }
+
         ImGui::SameLine();
 
-        ImGui::BeginDisabled(questionText[0] == '\0' || newQuestion.CurrentOptionIndex == 0 || newQuestion.CorrectOptionIndex == -1);
+        const bool canSave =
+            (questionText[0] != '\0' || question.Image > 0) &&
+            question.CurrentOptionIndex > 0 &&
+            question.CorrectOptionIndex >= 0 &&
+            question.CorrectOptionIndex <
+            question.CurrentOptionIndex;
+
+        ImGui::BeginDisabled(!canSave);
+
         if (ImGui::Button("Salvar", ImVec2(100, 0)))
         {
-            newQuestion.Text                = questionText;
-            newQuestion.Explanation         = explanationText;
-            questionText[0]                 = '\0';
-            explanationText[0]              = '\0';
-            answerText[0]                   = '\0';
-            m_Data.CurrentBank.Questions.push_back(newQuestion);
+            question.Text        = questionText;
+            question.Explanation = explanationText;
 
-            newQuestion                     = {};
-            m_QuestionWindow                = false;
+            // Keep CorrectOptionText synchronized.
+            if (question.CorrectOptionIndex >= 0 && question.CorrectOptionIndex < question.CurrentOptionIndex)
+            {
+                question.CorrectOptionText = question.Options[question.CorrectOptionIndex];
+            }
+            else
+            {
+                question.CorrectOptionText.clear();
+                question.CorrectOptionIndex = -1;
+            }
+
+            if (m_QuestionToEdit >= 0 && m_QuestionToEdit < static_cast<int>(m_Data.CurrentBank.Questions.size()))
+            {
+                m_Data.CurrentBank.Questions[m_QuestionToEdit] = question;
+            }
+            else
+            {
+                m_Data.CurrentBank.Questions.push_back(question);
+            }
+
+
+            question           = {};
+
+            questionText[0]    = '\0';
+            explanationText[0] = '\0';
+            answerText[0]      = '\0';
+
+            m_QuestionToEdit   = -1;
+            m_QuestionWindow   = false;
         }
+
         ImGui::EndDisabled();
 
         ImGui::End();
+
+        wasQuestionWindowOpen = m_QuestionWindow;
     }
 
     void Application::StatusWindow()
     {
         if (!m_StatusWindow) return;
 
-        ImGui::SetNextWindowSizeConstraints({ 350, 400 }, { FLT_MAX, FLT_MAX });
+        ImGui::SetNextWindowSizeConstraints({ 350, 450 }, { FLT_MAX, FLT_MAX });
         ImGui::Begin("##StatusWindow", &m_StatusWindow, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse);
 
         const auto size = ImGui::GetContentRegionAvail();
@@ -1038,21 +1538,81 @@ namespace QB
                     if (ImGui::TreeNodeEx(("Questão " + std::to_string(i + 1)).c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_FramePadding | ImGuiTreeNodeFlags_Bullet))
                     {
                         float questionDetailsHeight = CalculateQuestionDetailsHeight(question, ImGui::GetContentRegionAvail().x);
-                        ImGui::BeginChild("QuestionDetails", ImVec2(0, questionDetailsHeight), true);
+                        questionDetailsHeight       = question.Image != 0 ? questionDetailsHeight + QUESTION_IMAGE_HEIGHT : questionDetailsHeight;
+
+                        ImGui::BeginChild("##QuestionDetails", ImVec2(0, questionDetailsHeight), true);
                         {
                             DrawCategoryButtons(question.Categories, ImGui::GetContentRegionAvail().x);
 
-                            float questionInfoHeight = CalculateWrappedTextHeight(question.Text, ImGui::GetContentRegionAvail().x, PADDING);
-                            ImGui::BeginChild("QuestionInfo", ImVec2(0, questionInfoHeight), true);
+                            if (question.Image != 0 && m_Data.CurrentBank.Images[question.Image])
+                            {
+                                float width           = ImGui::GetContentRegionAvail().x;
 
-                            ImGui::SetCursorPos(ImVec2(PADDING, PADDING));
-                            ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x - PADDING);
-                            ImGui::TextUnformatted(question.Text.c_str());
-                            ImGui::PopTextWrapPos();
+                                ImGui::BeginGroup();
+                                ImGui::PushID((int)question.Image);
 
-                            ImGui::EndChild();
+                                ImVec2 viewport       = { width, QUESTION_IMAGE_HEIGHT };
+                                auto& image           = m_Data.CurrentBank.Images[question.Image];
 
-                            if (ImGui::BeginTable("AnswerOptions", 3, ImGuiTableFlags_SizingStretchProp))
+                                ImVec2 cursor         = ImGui::GetCursorScreenPos();
+                                ImDrawList* drawList  = ImGui::GetWindowDrawList();
+
+                                ImU32 backgroundColor = IM_COL32(30, 30, 30, 255);
+
+                                drawList->AddRectFilled(
+                                    cursor,
+                                    cursor + viewport,
+                                    backgroundColor,
+                                    4.0f);
+
+                                float imageWidth     = static_cast<float>(image->GetWidth());
+                                float imageHeight    = static_cast<float>(image->GetHeight());
+
+                                float targetAspect   = imageWidth / imageHeight;
+                                float viewportAspect = viewport.x / viewport.y;
+
+                                ImVec2 imageSize;
+                                if (viewportAspect > targetAspect)
+                                {
+                                    imageSize.y      = viewport.y;
+                                    imageSize.x      = imageSize.y * targetAspect;
+                                }
+                                else
+                                {
+                                    imageSize.x      = viewport.x;
+                                    imageSize.y      = imageSize.x / targetAspect;
+                                }
+
+                                ImVec2 imagePos;
+                                imagePos.x           = cursor.x + (viewport.x - imageSize.x) * 0.5f;
+                                imagePos.y           = cursor.y + (viewport.y - imageSize.y) * 0.5f;
+
+                                drawList->AddImage(
+                                    (ImTextureID)image->GetID(),
+                                    imagePos,
+                                    imagePos + imageSize
+                                );
+
+                                ImGui::Dummy(imageSize);
+
+                                ImGui::PopID();
+                                ImGui::EndGroup();
+                            }
+
+                            if (!question.Text.empty())
+                            {
+                                float questionInfoHeight = CalculateWrappedTextHeight(question.Text, ImGui::GetContentRegionAvail().x, PADDING);
+                                ImGui::BeginChild("##QuestionInfo", ImVec2(0, questionInfoHeight), true);
+
+                                ImGui::SetCursorPos(ImVec2(PADDING, PADDING));
+                                ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x - PADDING);
+                                ImGui::TextUnformatted(question.Text.c_str());
+                                ImGui::PopTextWrapPos();
+
+                                ImGui::EndChild();
+                            }
+
+                            if (ImGui::BeginTable("##AnswerOptions", 3, ImGuiTableFlags_SizingStretchProp))
                             {
                                 ImGui::TableSetupColumn("A", ImGuiTableColumnFlags_WidthStretch);
                                 ImGui::TableSetupColumn("B", ImGuiTableColumnFlags_WidthStretch);
@@ -1169,6 +1729,232 @@ namespace QB
         ImGui::EndDisabled();
 
         ImGui::End();
+    }
+
+    void Application::MainWindow()
+    {
+        ImGui::SetNextWindowDockID(ImGui::GetID("MyDockspace"), ImGuiCond_Once);
+        ImGui::Begin("QBank");
+
+        float categoriesHeight = CalculateCategoryButtonsHeight(m_Data.CurrentBank.Categories, ImGui::GetContentRegionAvail().x);
+        ImGui::BeginChild("Categories", ImVec2(0, categoriesHeight));
+        DrawCategoryButtons(m_Data.CurrentBank.Categories, ImGui::GetContentRegionAvail().x);
+        ImGui::EndChild();
+
+        if (m_FilteredQuestions.empty() && !m_CategorySelected.empty())
+        {
+            ImGui::Text("Não foi encontrado nenhum resultado para: '%s'", m_CategorySelected.c_str());
+        }
+        else
+        {
+            size_t size = m_FilteredQuestions.empty() ? m_Data.CurrentBank.Questions.size() : m_FilteredQuestions.size();
+            for (size_t i = 0; i < size; ++i)
+            {
+                auto& question = m_Data.CurrentBank.Questions[m_FilteredQuestions.empty() ? i : m_FilteredQuestions[i]];
+                ImGui::PushID((int)i);
+
+                bool open = ImGui::TreeNodeEx(("Questão " + std::to_string(i + 1)).c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_FramePadding | ImGuiTreeNodeFlags_Bullet);
+                ImGui::SameLine();
+                if (ImGui::Button("Editar"))
+                {
+                    m_QuestionToEdit = m_FilteredQuestions.empty() ? (int)i : m_FilteredQuestions[i];
+                    m_QuestionWindow = true;
+                }
+
+                if (open)
+                {
+                    float questionDetailsHeight = CalculateQuestionDetailsHeight(question, ImGui::GetContentRegionAvail().x);
+                    questionDetailsHeight = question.Image != 0 ? questionDetailsHeight + QUESTION_IMAGE_HEIGHT : questionDetailsHeight;
+
+                    ImGui::BeginChild("##QuestionDetails", ImVec2(0, questionDetailsHeight), true);
+                    {
+                        DrawCategoryButtons(question.Categories, ImGui::GetContentRegionAvail().x);
+
+                        if (question.Image != 0 && m_Data.CurrentBank.Images[question.Image])
+                        {
+                            float width = ImGui::GetContentRegionAvail().x;
+
+                            ImGui::BeginGroup();
+                            ImGui::PushID((int)question.Image);
+
+                            ImVec2 viewport = { width, QUESTION_IMAGE_HEIGHT };
+                            auto& image = m_Data.CurrentBank.Images[question.Image];
+
+                            ImVec2 cursor = ImGui::GetCursorScreenPos();
+                            ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+                            ImU32 backgroundColor = IM_COL32(30, 30, 30, 255);
+
+                            drawList->AddRectFilled(
+                                cursor,
+                                cursor + viewport,
+                                backgroundColor,
+                                4.0f);
+
+                            float imageWidth = static_cast<float>(image->GetWidth());
+                            float imageHeight = static_cast<float>(image->GetHeight());
+
+                            float targetAspect = imageWidth / imageHeight;
+                            float viewportAspect = viewport.x / viewport.y;
+
+                            ImVec2 imageSize;
+                            if (viewportAspect > targetAspect)
+                            {
+                                imageSize.y = viewport.y;
+                                imageSize.x = imageSize.y * targetAspect;
+                            }
+                            else
+                            {
+                                imageSize.x = viewport.x;
+                                imageSize.y = imageSize.x / targetAspect;
+                            }
+
+                            ImVec2 imagePos;
+                            imagePos.x = cursor.x + (viewport.x - imageSize.x) * 0.5f;
+                            imagePos.y = cursor.y + (viewport.y - imageSize.y) * 0.5f;
+
+                            drawList->AddImage(
+                                (ImTextureID)image->GetID(),
+                                imagePos,
+                                imagePos + imageSize
+                            );
+
+                            ImGui::Dummy(imageSize);
+
+                            ImGui::PopID();
+                            ImGui::EndGroup();
+                        }
+
+                        if (!question.Text.empty())
+                        {
+                            float questionInfoHeight = CalculateWrappedTextHeight(question.Text, ImGui::GetContentRegionAvail().x, PADDING);
+                            ImGui::BeginChild("##QuestionInfo", ImVec2(0, questionInfoHeight), true);
+
+                            ImGui::SetCursorPos(ImVec2(PADDING, PADDING));
+                            ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x - PADDING);
+                            ImGui::TextUnformatted(question.Text.c_str());
+                            ImGui::PopTextWrapPos();
+
+                            ImGui::EndChild();
+                        }
+
+                        if (ImGui::BeginTable("##AnswerOptions", 3, ImGuiTableFlags_SizingStretchProp))
+                        {
+                            ImGui::TableSetupColumn("A", ImGuiTableColumnFlags_WidthStretch);
+                            ImGui::TableSetupColumn("B", ImGuiTableColumnFlags_WidthStretch);
+                            ImGui::TableSetupColumn("C", ImGuiTableColumnFlags_WidthStretch);
+
+                            const int optionCount = question.CurrentOptionIndex;
+                            for (int i = 0; i < optionCount; i += 3)
+                            {
+                                ImGui::TableNextRow();
+
+                                for (size_t column = 0; column < 3; column++)
+                                {
+                                    const size_t optionIndex = i + column;
+
+                                    ImGui::TableNextColumn();
+
+                                    if (optionIndex >= optionCount)
+                                        continue;
+
+                                    auto index = static_cast<int>(optionIndex);
+                                    ImGui::PushID(index);
+
+                                    bool marked = question.OptionMarkedIndex == index;
+                                    if (ImGui::Checkbox("", &marked))
+                                    {
+                                        question.OptionMarkedIndex = question.OptionMarkedIndex == index ? -1 : index;
+                                    }
+                                    ImGui::SameLine();
+                                    ImGui::Text("(%c)", 'A' + static_cast<char>(optionIndex));
+                                    ImGui::SameLine();
+                                    ImGui::PushTextWrapPos();
+                                    ImGui::TextUnformatted(question.Options[optionIndex].c_str());
+                                    ImGui::PopTextWrapPos();
+
+                                    ImGui::PopID();
+                                }
+                            }
+                            ImGui::EndTable();
+                        }
+                    }
+                    ImGui::EndChild();
+
+                    ImGui::TreePop();
+                }
+
+                ImGui::PopID();
+            }
+        }
+
+        ImGui::End();
+    }
+
+    void Application::DrawCategoryButtons(const std::string& p_Categories, float p_Width)
+    {
+        std::stringstream ss(p_Categories);
+        const ImGuiStyle& style = ImGui::GetStyle();
+        const float spacing     = style.ItemSpacing.x; std::string category;
+        float lineWidth         = 0.0f;
+        bool first              = true;
+
+        auto hasCategory = [](const std::string& p_Categories, const std::string& p_Category)
+        {
+            std::stringstream ss(p_Categories);
+            std::string current;
+
+            while (std::getline(ss, current, ';'))
+            {
+                if (current == p_Category)
+                    return true;
+            }
+
+            return false;
+        };
+
+        while (std::getline(ss, category, ';'))
+        {
+            const ImVec2 textSize = ImGui::CalcTextSize(category.c_str());
+            const float buttonWidth = textSize.x + style.FramePadding.x * 2.0f;
+            const float requiredWidth = first ? buttonWidth : spacing + buttonWidth;
+            if (!first && lineWidth + requiredWidth > p_Width)
+                lineWidth = buttonWidth;
+            else
+            {
+                if (!first)
+                    ImGui::SameLine();
+                lineWidth += requiredWidth;
+            }
+
+            bool selected = m_CategorySelected == category;
+
+            auto activeColor = IM_COL32(60, 60, 60, 255);
+            ImGui::PushStyleColor(ImGuiCol_Button, selected ? activeColor : IM_COL32(30, 30, 30, 255));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(45, 45, 45, 255));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, activeColor);
+
+            if (ImGui::Button(category.c_str(), ImVec2(buttonWidth, 0.0f)))
+            {
+                m_FilteredQuestions.clear();
+                if (!selected)
+                {
+                    for (size_t i = 0; i < m_Data.CurrentBank.Questions.size(); i++)
+                    {
+                        auto& question = m_Data.CurrentBank.Questions[i];
+                        if (hasCategory(question.Categories, category))
+                        {
+                            m_FilteredQuestions.push_back((int)i);
+                        }
+                    }
+                }
+                m_CategorySelected = selected ? "" : category;
+            }
+
+            ImGui::PopStyleColor(3);
+
+            first = false;
+        }
     }
 
 } // namespace QB

@@ -1,8 +1,12 @@
 #pragma once
+#include "Image.h"
+#include "ExternalDragDrop.h"
+
 // std
 #include <string>
 #include <vector>
 #include <array>
+#include <unordered_map>
 
 // lib
 #define GLFW_INCLUDE_NONE
@@ -20,6 +24,7 @@ namespace QB
         std::string CorrectOptionText = "";
         std::array<std::string, 26> Options;
         int CurrentOptionIndex        = 0;
+        uint64_t Image                = 0;
 
         int OptionMarkedIndex         = -1;
     };
@@ -29,6 +34,7 @@ namespace QB
         std::string Name = "";
         std::string Categories;
         std::vector<Question> Questions;
+        std::unordered_map<uint64_t, std::shared_ptr<Image>> Images;
     };
 
     struct Status
@@ -56,9 +62,13 @@ namespace QB
             void Run();
         private:
             void Init(bool p_LoadStartBank = true);
-            void QuestionCreation();
+            void QuestionWindow();
             void StatusWindow();
             void BankExportWindow();
+            void MainWindow();
+
+        private:
+            void DrawCategoryButtons(const std::string& p_Categories, float p_Width);
 
         private:
             GLFWwindow* m_Window    = nullptr;
@@ -76,6 +86,14 @@ namespace QB
             } m_Data = {};
 
             std::vector<std::string> m_BankNames;
+
+            std::string m_CategorySelected = "";
+            std::vector<int> m_FilteredQuestions;
+
+            std::shared_ptr<Image> m_WhiteImage = nullptr;
+            ExternalDragDrop m_ExternalDragDrop;
+
+            int m_QuestionToEdit = -1;
     };
 
 } // namespace QB
