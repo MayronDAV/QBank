@@ -28,14 +28,15 @@ namespace QB
         static uint32_t s_MaxImageWidth              = 2048;
         static uint32_t s_MaxImageHeight             = 2048;
         static constexpr float QUESTION_IMAGE_HEIGHT = 100.0f;
+        static constexpr float SIDEBAR_WIDTH         = 40.0f;
 
-        static void  BeginDockspace(std::string p_ID, std::string p_Dockspace, bool p_MenuBar, ImGuiDockNodeFlags p_DockFlags)
+        static void  BeginDockspace(std::string p_ID, std::string p_Dockspace, bool p_MenuBar, ImGuiDockNodeFlags p_DockFlags, ImGuiWindowFlags p_WindowFlags = 0)
         {
             static bool opt_fullscreen = true;
             static bool opt_padding = false;
             static ImGuiDockNodeFlags dockspace_flags = ImGuiDockNodeFlags_NoWindowMenuButton | ImGuiDockNodeFlags_NoCloseButton;
 
-            ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDocking;
+            ImGuiWindowFlags window_flags = ImGuiWindowFlags_NoDocking | p_WindowFlags;
             if (p_MenuBar)
                 window_flags |= ImGuiWindowFlags_MenuBar;
 
@@ -217,15 +218,14 @@ namespace QB
 
         static bool  ExportQuestionBank(const Bank& p_Bank)
         {
-            std::filesystem::path folder = FOLDER_PATH;
-            if (!std::filesystem::exists(folder))
-                std::filesystem::create_directories(folder);
+            auto filepath = std::filesystem::absolute(p_Bank.Path).replace_extension(".qbank");
+            if (!std::filesystem::exists(filepath.parent_path()))
+                std::filesystem::create_directories(filepath.parent_path());
 
-            const auto path = folder / (p_Bank.Name + ".qbank");
-            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            std::ofstream out(filepath, std::ios::binary | std::ios::trunc);
             if (!out)
             {
-                std::cerr << "Failed to export bank at " << path.string() << "\n";
+                std::cerr << "Failed to export bank at " << filepath.string() << "\n";
                 return false;
             }
 
@@ -284,7 +284,7 @@ namespace QB
         static Bank  ImportQuestionBank(const std::string& p_Path)
         {
             Bank bank = {};
-            bank.Name = std::filesystem::path(p_Path).stem().string();
+            bank.Path = std::filesystem::absolute(p_Path).string();
 
             std::ifstream in(p_Path, std::ios::binary);
             if (!in)
@@ -352,11 +352,12 @@ namespace QB
         {
             char Magic[5]         = { 'Q', 'B', 'A', 'P', 'P' };
             uint32_t Version      = 1;
+            size_t BanksCount     = 0;
         };
 
-        static bool  ExportAppConfig(const ApplicationConfig& p_Config)
+        static bool  ExportAppSession(const AppSession& p_Session)
         {
-            const std::string path = "ini.qbapp";
+            const std::string path = "session.qbapp";
             std::ofstream out(path, std::ios::binary | std::ios::trunc);
             if (!out)
             {
@@ -365,40 +366,56 @@ namespace QB
             }
 
             APPHeader header;
+            header.BanksCount = p_Session.Banks.size();
             out.write(reinterpret_cast<const char*>(&header), sizeof(header));
 
-            WriteString(out, p_Config.StartBank);
-            out.write(reinterpret_cast<const char*>(&p_Config.Maximize), sizeof(p_Config.Maximize));
-            out.write(reinterpret_cast<const char*>(&p_Config.Width), sizeof(p_Config.Width));
-            out.write(reinterpret_cast<const char*>(&p_Config.Height), sizeof(p_Config.Height));
+            out.write(reinterpret_cast<const char*>(&p_Session.Maximize), sizeof(p_Session.Maximize));
+            out.write(reinterpret_cast<const char*>(&p_Session.Width), sizeof(p_Session.Width));
+            out.write(reinterpret_cast<const char*>(&p_Session.Height), sizeof(p_Session.Height));
+
+            WriteString(out, p_Session.StartBank);
+            WriteString(out, p_Session.CategorySelected);
+
+            for (size_t i = 0; i < header.BanksCount; i++)
+            {
+                WriteString(out, p_Session.Banks[i]);
+            }
 
             return true;
         }
 
-        static ApplicationConfig ImportAppConfig()
+        static AppSession ImportAppSession()
         {
-            const std::string path   = "ini.qbapp";
-            ApplicationConfig config = {};
+            const std::string path   = "session.qbapp";
+            AppSession session = {};
 
             if (!std::filesystem::exists(path))
-                return config;
+                return session;
 
             std::ifstream in(path, std::ios::binary);
             if (!in)
             {
-                std::cerr << "Failed to import app config: " << path << "\n";
-                return config;
+                std::cerr << "Failed to import app session: " << path << "\n";
+                return session;
             }
 
             APPHeader header;
             in.read(reinterpret_cast<char*>(&header), sizeof(header));
 
-            config.StartBank = ReadString(in);
-            in.read(reinterpret_cast<char*>(&config.Maximize), sizeof(config.Maximize));
-            in.read(reinterpret_cast<char*>(&config.Width), sizeof(config.Width));
-            in.read(reinterpret_cast<char*>(&config.Height), sizeof(config.Height));
+            in.read(reinterpret_cast<char*>(&session.Maximize), sizeof(session.Maximize));
+            in.read(reinterpret_cast<char*>(&session.Width), sizeof(session.Width));
+            in.read(reinterpret_cast<char*>(&session.Height), sizeof(session.Height));
 
-            return config;
+            session.StartBank        = ReadString(in);
+            session.CategorySelected = ReadString(in);
+
+            session.Banks.resize(header.BanksCount);
+            for (size_t i = 0; i < header.BanksCount; i++)
+            {
+                session.Banks[i] = ReadString(in);
+            }
+
+            return session;
         }
 
         uint8_t* LoadImageFromFile(const char* p_Path, uint32_t* p_Width, uint32_t* p_Height, uint32_t* p_Channels, uint32_t* p_Bytes, bool* p_IsHDR, bool p_FlipY)
@@ -542,6 +559,80 @@ namespace QB
             (HashCombine(p_Seed, p_Rest), ...);
         }
 
+        static void AddTextRotated(ImDrawList* p_DrawList, const ImVec2& p_Pos, ImU32 p_Color, const char* p_Text, float p_Angle)
+        {
+            const int vtxStart     = p_DrawList->VtxBuffer.Size;
+
+            p_DrawList->AddText(p_Pos, p_Color, p_Text);
+
+            const int vtxEnd       = p_DrawList->VtxBuffer.Size;
+
+            const ImVec2 center    = {
+                p_Pos.x + ImGui::CalcTextSize(p_Text).x * 0.5f,
+                p_Pos.y + ImGui::GetFontSize() * 0.5f
+            };
+
+            const float s          = sinf(p_Angle);
+            const float c          = cosf(p_Angle);
+
+            for (int i = vtxStart; i < vtxEnd; i++)
+            {
+                ImDrawVert& vertex = p_DrawList->VtxBuffer[i];
+
+                const ImVec2 p     = vertex.pos - center;
+                vertex.pos.x       = p.x * c - p.y * s + center.x;
+                vertex.pos.y       = p.x * s + p.y * c + center.y;
+            }
+        }
+
+        static bool VerticalButton(const char* p_Label, const ImVec2& p_Size, bool p_Selected = false)
+        {
+            const bool pressed        = ImGui::InvisibleButton(p_Label, p_Size);
+            const bool hovered        = ImGui::IsItemHovered();
+            const bool active         = ImGui::IsItemActive();
+
+            ImDrawList* drawList      = ImGui::GetWindowDrawList();
+
+            const ImVec2 min          = ImGui::GetItemRectMin();
+            const ImVec2 max          = ImGui::GetItemRectMax();
+
+            const float lineX         = min.x + 1.0f;
+
+            ImU32 lineColor;
+            if (active)
+                lineColor             = ImGui::GetColorU32(ImGuiCol_ButtonActive);
+            else if (p_Selected)
+                lineColor             = ImGui::GetColorU32(ImGuiCol_ButtonActive);
+            else if (hovered)
+                lineColor             = ImGui::GetColorU32(ImGuiCol_ButtonHovered);
+            else
+                lineColor             = ImGui::GetColorU32(ImGuiCol_Border);
+
+            const float lineThickness = (active || p_Selected) ? 3.0f : hovered ? 2.0f : 1.0f;
+            drawList->AddLine(
+                ImVec2(lineX, min.y),
+                ImVec2(lineX, max.y),
+                lineColor,
+                lineThickness
+            );
+
+            const ImVec2 textSize     = ImGui::CalcTextSize(p_Label);
+            ImVec2 textPos            = {
+                (min.x + max.x) * 0.5f - textSize.x * 0.5f,
+                (min.y + max.y) * 0.5f - ImGui::GetFontSize() * 0.5f
+            };
+
+            AddTextRotated(
+                drawList,
+                textPos,
+                ImGui::GetColorU32(ImGuiCol_Text),
+                p_Label,
+                IM_PI * 0.5f
+            );
+
+            return pressed;
+        }
+
     } // namespace
 
     Application::Application()
@@ -576,7 +667,11 @@ namespace QB
         if (!bankPath.empty())
         {
             if (std::filesystem::exists(bankPath))
-                m_Data.CurrentBank = ImportQuestionBank(bankPath);
+            {
+                auto absPath        = std::filesystem::absolute(bankPath).lexically_normal().generic_string();
+                ImportBank(absPath);
+                ChangeBank(absPath);
+            }
             else
                 std::cerr << "Failed to open the bank path, the file doesn't exist! " << bankPath << "\n";
         }
@@ -584,9 +679,9 @@ namespace QB
 
     Application::~Application()
     {
-        std::filesystem::path folder = FOLDER_PATH;
-        m_Data.Config.StartBank      = m_Data.CurrentBank.Name.empty() ? "" : (folder / (m_Data.CurrentBank.Name + ".qbank")).lexically_normal().generic_string();
-        ExportAppConfig(m_Data.Config);
+        m_Session.StartBank        = m_Bank ? m_Bank->Path : "";
+        m_Session.CategorySelected = m_CategorySelected;
+        ExportAppSession(m_Session);
 
         m_ExternalDragDrop.Shutdown();
 
@@ -618,7 +713,9 @@ namespace QB
             // UI
             // -------------------------
 
-            BeginDockspace("MyDockspace", "MainDockspace", true, ImGuiDockNodeFlags_NoTabBar);
+            BeginDockspace("MyDockspace", "MainDockspace", true, ImGuiDockNodeFlags_NoTabBar | ImGuiDockNodeFlags_NoResizeX);
+
+            SetupDockspace();
 
             if (ImGui::BeginMenuBar())
             {
@@ -626,7 +723,8 @@ namespace QB
                 {
                     if (ImGui::MenuItem("Novo"))
                     {
-                        m_Data.CurrentBank = {};
+                        m_BankExportWindow = false;
+                        m_BankCreateWindow = true;
                     }
 
                     if (ImGui::BeginMenu("Abrir"))
@@ -636,7 +734,9 @@ namespace QB
                             std::string path = "";
                             if (FileDialog::Open({ { "Banks", "*.qbank" } }, "Banks", path) == FileDialogResult::SUCCESS)
                             {
-                                m_Data.CurrentBank = ImportQuestionBank(path);
+                                auto filePath = std::filesystem::absolute(path).lexically_normal().generic_string();
+                                ImportBank(filePath);
+                                ChangeBank(filePath);
                             }
                         }
 
@@ -648,7 +748,9 @@ namespace QB
                             auto stem = std::filesystem::path(path).stem().string();
                             if (ImGui::MenuItem(stem.c_str()))
                             {
-                                m_Data.CurrentBank = ImportQuestionBank(path);
+                                auto filePath = std::filesystem::absolute(path).lexically_normal().generic_string();
+                                ImportBank(filePath);
+                                ChangeBank(filePath);
                             }
                         }
 
@@ -657,15 +759,14 @@ namespace QB
 
                     ImGui::Separator();
 
-                    ImGui::BeginDisabled(m_Data.CurrentBank.Name.empty());
-                    if (ImGui::MenuItem("Salvar"))
+                    if (ImGui::MenuItem("Salvar", nullptr, false, m_Bank != nullptr && !m_Bank->Path.empty()))
                     {
-                        ExportQuestionBank(m_Data.CurrentBank);
+                        ExportQuestionBank(*m_Bank);
                     }
-                    ImGui::EndDisabled();
 
                     if (ImGui::MenuItem("Salvar Como"))
                     {
+                        m_BankCreateWindow = false;
                         m_BankExportWindow = true;
                     }
 
@@ -684,28 +785,32 @@ namespace QB
                     m_QuestionWindow = true;
                 }
 
-                if (ImGui::MenuItem("Finalizar Tentativa"))
+                if (ImGui::MenuItem("Finalizar Tentativa", nullptr, false, m_Bank != nullptr))
                 {
                     m_StatusWindow        = true;
-                    m_Status              = {};
-                    m_Status.TotalAnswers = (int)m_Data.CurrentBank.Questions.size();
-                    for (int i = 0; i < m_Status.TotalAnswers; i++)
+                    m_Bank->CurStatus     = {};
+                    m_Bank->CurStatus.TotalAnswers = (int)m_Bank->Questions.size();
+                    for (int i = 0; i < m_Bank->CurStatus.TotalAnswers; i++)
                     {
-                        auto& question = m_Data.CurrentBank.Questions[i];
+                        auto& question = m_Bank->Questions[i];
                         if (question.OptionMarkedIndex == question.CorrectOptionIndex)
                         {
                             if (question.Options[question.OptionMarkedIndex] == question.CorrectOptionText)
-                                m_Status.CorrectAnswers++;
+                                m_Bank->CurStatus.CorrectAnswers++;
                         }
                         else
                         {
-                            m_Status.IncorrectQuestions.push_back(i);
+                            m_Bank->CurStatus.IncorrectQuestions.push_back(i);
                         }
                     }
                 }
 
                 ImGui::EndMenuBar();
             }
+
+            SideMenuWindow();
+
+            BanksWindow();
 
             QuestionWindow();
 
@@ -721,13 +826,13 @@ namespace QB
             // Render
             // -------------------------
 
-            glViewport(0, 0, m_Data.Config.Width, m_Data.Config.Height);
+            glViewport(0, 0, m_Session.Width, m_Session.Height);
 
             glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
 
             ImGuiIO& io    = ImGui::GetIO();
-            io.DisplaySize = ImVec2((float)m_Data.Config.Width, (float)m_Data.Config.Height);
+            io.DisplaySize = ImVec2((float)m_Session.Width, (float)m_Session.Height);
 
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -755,16 +860,16 @@ namespace QB
             std::exit(-1);
         }
 
-        m_Data.Config = ImportAppConfig();
+        m_Session = ImportAppSession();
 
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-        glfwWindowHint(GLFW_MAXIMIZED, m_Data.Config.Maximize);
+        glfwWindowHint(GLFW_MAXIMIZED, m_Session.Maximize);
 
         m_Window = glfwCreateWindow(
-            m_Data.Config.Width,
-            m_Data.Config.Height,
+            m_Session.Width,
+            m_Session.Height,
             "QBank",
             nullptr,
             nullptr
@@ -789,33 +894,46 @@ namespace QB
             std::exit(-1);
         }
 
-        glfwSetWindowUserPointer(m_Window, &m_Data);
+        glfwSetWindowUserPointer(m_Window, this);
 
         glfwSetWindowSizeCallback(m_Window, [](GLFWwindow* p_Window, int p_Width, int p_Height)
         {
-            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(p_Window);
-            data.Config.Width = p_Width;
-            data.Config.Height = p_Height;
+            Application& data = *(Application*)glfwGetWindowUserPointer(p_Window);
+            data.m_Session.Width = p_Width;
+            data.m_Session.Height = p_Height;
         });
 
         glfwSetWindowMaximizeCallback(m_Window, [](GLFWwindow* p_Window, int p_Maximize)
         {
-            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(p_Window);
-            data.Config.Maximize = p_Maximize == GLFW_TRUE;
+            Application& data = *(Application*)glfwGetWindowUserPointer(p_Window);
+            data.m_Session.Maximize = p_Maximize == GLFW_TRUE;
         });
 
-        glfwSetDropCallback(m_Window, [](GLFWwindow* p_Window, int p_PathCount, const char* p_Paths[])
-        {
-            if (p_PathCount <= 0)
-                return;
+        // FIX IT
+        //glfwSetDropCallback(m_Window, [](GLFWwindow* p_Window, int p_PathCount, const char* p_Paths[])
+        //{
+        //    if (p_PathCount <= 0)
+        //        return;
 
-            std::filesystem::path filepath = p_Paths[0];
-            if (filepath.extension() != ".qbank")
-                return;
+        //    Application& data = *(Application*)glfwGetWindowUserPointer(p_Window);
 
-            WindowData& data = *(WindowData*)glfwGetWindowUserPointer(p_Window);
-            data.CurrentBank = ImportQuestionBank(filepath.string());
-        });
+        //    std::string startPath = "";
+        //    for (int i = 0; i < p_PathCount; i++)
+        //    {
+        //        std::filesystem::path filepath = p_Paths[i];
+        //        if (filepath.extension() != ".qbank")
+        //            continue;
+
+        //        auto path = filepath.lexically_normal().string();
+        //        data.ImportBank(path);
+
+        //        if (i == 0)
+        //            startPath = path;
+        //    }
+
+        //    if (!startPath.empty())
+        //        data.ChangeBank(startPath);
+        //});
 
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
@@ -847,14 +965,25 @@ namespace QB
                 if (path.extension() != ".qbank")
                     continue;
 
-
                 auto filepath = folderPath / std::filesystem::relative(path, folderPath);
                 m_BankNames.push_back(filepath.lexically_normal().generic_string());
             }
         }
 
-        if (p_LoadStartBank && !m_Data.Config.StartBank.empty() && std::filesystem::exists(m_Data.Config.StartBank))
-            m_Data.CurrentBank = ImportQuestionBank(m_Data.Config.StartBank);
+        
+        for (const auto& path : m_Session.Banks)
+        {
+            ImportBank(path, false);
+        }
+
+        if (p_LoadStartBank && !m_Session.StartBank.empty() && std::filesystem::exists(m_Session.StartBank))
+        {
+            ChangeBank(m_Session.StartBank);
+        }
+
+        m_Banks["Default"] = {};
+        if (!m_Bank)
+            m_Bank = &m_Banks["Default"];
 
         m_ExternalDragDrop.Initialize(m_Window);
 
@@ -872,7 +1001,7 @@ namespace QB
         static char answerText[256]       = {};
 
         const bool justOpened = m_QuestionWindow && !wasQuestionWindowOpen;
-        if (!m_QuestionWindow)
+        if (!m_QuestionWindow || !m_Bank)
         {
             wasQuestionWindowOpen = false;
             return;
@@ -886,9 +1015,9 @@ namespace QB
             std::memset(explanationText, 0, sizeof(explanationText));
             std::memset(answerText, 0, sizeof(answerText));
 
-            if (m_QuestionToEdit >= 0 && m_QuestionToEdit < static_cast<int>(m_Data.CurrentBank.Questions.size()))
+            if (m_QuestionToEdit >= 0 && m_QuestionToEdit < static_cast<int>(m_Bank->Questions.size()))
             {
-                question = m_Data.CurrentBank.Questions[m_QuestionToEdit];
+                question = m_Bank->Questions[m_QuestionToEdit];
 
                 std::snprintf(questionText, sizeof(questionText), "%s", question.Text.c_str());
                 std::snprintf(explanationText, sizeof(explanationText), "%s", question.Explanation.c_str());
@@ -931,8 +1060,8 @@ namespace QB
             std::shared_ptr<Image> image = m_WhiteImage;
             if (question.Image > 0)
             {
-                auto it = m_Data.CurrentBank.Images.find(question.Image);
-                if (it != m_Data.CurrentBank.Images.end() && it->second)
+                auto it = m_Bank->Images.find(question.Image);
+                if (it != m_Bank->Images.end() && it->second)
                     image = it->second;
             }
 
@@ -950,7 +1079,7 @@ namespace QB
                 if (FileDialog::Open({ { "Images", "*" } }, "", path) == FileDialogResult::SUCCESS)
                 {
                     const auto hash                 = HashString(path);
-                    m_Data.CurrentBank.Images[hash] = LoadImage(path);
+                    m_Bank->Images[hash] = LoadImage(path);
                     question.Image                  = hash;
                 }
             }
@@ -1062,7 +1191,7 @@ namespace QB
                     const std::string path = file.string();
                     const auto hash = HashString(path);
 
-                    m_Data.CurrentBank.Images[hash] = LoadImage(path);
+                    m_Bank->Images[hash] = LoadImage(path);
                     question.Image = hash;
 
                     // One image is enough for this question.
@@ -1185,7 +1314,7 @@ namespace QB
             ImGui::SetNextWindowSizeConstraints({ size.x, 50.0f }, { size.x, 150.0f });
             ImGui::BeginChild("##Categories", { 0, 0 }, true);
             {
-                std::stringstream ss(m_Data.CurrentBank.Categories);
+                std::stringstream ss(m_Bank->Categories);
                 std::string category;
 
                 while (std::getline(ss, category, ';'))
@@ -1228,7 +1357,7 @@ namespace QB
                 bool exists = false;
 
                 {
-                    std::stringstream ss(m_Data.CurrentBank.Categories);
+                    std::stringstream ss(m_Bank->Categories);
                     std::string current;
 
                     while (std::getline(ss, current, ';'))
@@ -1243,10 +1372,10 @@ namespace QB
 
                 if (!exists)
                 {
-                    if (!m_Data.CurrentBank.Categories.empty())
-                        m_Data.CurrentBank.Categories += ';';
+                    if (!m_Bank->Categories.empty())
+                        m_Bank->Categories += ';';
 
-                    m_Data.CurrentBank.Categories += category;
+                    m_Bank->Categories += category;
                 }
 
                 addCategory(category);
@@ -1481,13 +1610,13 @@ namespace QB
                 question.CorrectOptionIndex = -1;
             }
 
-            if (m_QuestionToEdit >= 0 && m_QuestionToEdit < static_cast<int>(m_Data.CurrentBank.Questions.size()))
+            if (m_QuestionToEdit >= 0 && m_QuestionToEdit < static_cast<int>(m_Bank->Questions.size()))
             {
-                m_Data.CurrentBank.Questions[m_QuestionToEdit] = question;
+                m_Bank->Questions[m_QuestionToEdit] = question;
             }
             else
             {
-                m_Data.CurrentBank.Questions.push_back(question);
+                m_Bank->Questions.push_back(question);
             }
 
 
@@ -1511,6 +1640,9 @@ namespace QB
     void Application::StatusWindow()
     {
         if (!m_StatusWindow) return;
+        if (!m_Bank) return;
+
+        auto& status = m_Bank->CurStatus;
 
         ImGui::SetNextWindowSizeConstraints({ 350, 450 }, { FLT_MAX, FLT_MAX });
         ImGui::Begin("##StatusWindow", &m_StatusWindow, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse);
@@ -1518,9 +1650,9 @@ namespace QB
         const auto size = ImGui::GetContentRegionAvail();
         ImGui::BeginChild("##StatusInfo", { 0.0f, size.y - 23.0f }, false);
 
-        ImGui::Text("Respostas Corretas: %i/%i", m_Status.CorrectAnswers, m_Status.TotalAnswers);
+        ImGui::Text("Respostas Corretas: %i/%i", status.CorrectAnswers, status.TotalAnswers);
         
-        if (m_Status.CorrectAnswers == m_Status.TotalAnswers)
+        if (status.CorrectAnswers == status.TotalAnswers)
         {
             ImGui::TextColored({ 0.0f, 1.0f, 0.0f, 1.0f }, "Parabéns, você acertou todas as questões!!!");
         }
@@ -1530,9 +1662,9 @@ namespace QB
             {
                 ImGui::BeginChild("##IncorrectAnswers", { 0.0f, 0.0f }, true);
 
-                for (size_t i = 0; i < m_Status.IncorrectQuestions.size(); ++i)
+                for (size_t i = 0; i < status.IncorrectQuestions.size(); ++i)
                 {
-                    auto& question = m_Data.CurrentBank.Questions[i];
+                    auto& question = m_Bank->Questions[i];
                     ImGui::PushID((int)i);
 
                     if (ImGui::TreeNodeEx(("Questão " + std::to_string(i + 1)).c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_FramePadding | ImGuiTreeNodeFlags_Bullet))
@@ -1544,7 +1676,7 @@ namespace QB
                         {
                             DrawCategoryButtons(question.Categories, ImGui::GetContentRegionAvail().x);
 
-                            if (question.Image != 0 && m_Data.CurrentBank.Images[question.Image])
+                            if (question.Image != 0 && m_Bank->Images[question.Image])
                             {
                                 float width           = ImGui::GetContentRegionAvail().x;
 
@@ -1552,7 +1684,7 @@ namespace QB
                                 ImGui::PushID((int)question.Image);
 
                                 ImVec2 viewport       = { width, QUESTION_IMAGE_HEIGHT };
-                                auto& image           = m_Data.CurrentBank.Images[question.Image];
+                                auto& image           = m_Bank->Images[question.Image];
 
                                 ImVec2 cursor         = ImGui::GetCursorScreenPos();
                                 ImDrawList* drawList  = ImGui::GetWindowDrawList();
@@ -1689,8 +1821,8 @@ namespace QB
         // TODO: Add a way to save the status of each attempt and show it somewhere
         if (ImGui::Button("Fechar", ImVec2(100, 0)))
         {
-            m_Status = {};
-            for (auto& question : m_Data.CurrentBank.Questions)
+            m_Bank->CurStatus = {};
+            for (auto& question : m_Bank->Questions)
             {
                 question.OptionMarkedIndex = -1;
             }
@@ -1701,12 +1833,16 @@ namespace QB
 
     void Application::BankExportWindow()
     {
-        if (!m_BankExportWindow) return;
+        if (!m_Bank) return;
+        if (!m_BankExportWindow && !m_BankCreateWindow) return;
 
         static char buffer[256] = {};
 
         ImGui::SetNextWindowSizeConstraints({ 300, 70 }, { FLT_MAX, FLT_MAX });
-        ImGui::Begin("##BankExport", &m_BankExportWindow, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoDecoration );
+        if (m_BankExportWindow)
+            ImGui::Begin("##BankExport", &m_BankExportWindow, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoDecoration );
+        if (m_BankCreateWindow)
+            ImGui::Begin("##BankCreate", &m_BankCreateWindow, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoDecoration);
 
         ImGui::Text("Name:");
         ImGui::InputText("##Name", buffer, sizeof(buffer), ImGuiInputTextFlags_AutoSelectAll);
@@ -1714,181 +1850,368 @@ namespace QB
         if (ImGui::Button("Cancelar"))
         {
             m_BankExportWindow = false;
+            m_BankCreateWindow = false;
             buffer[0]          = '\0';
         }
         ImGui::SameLine();
-        ImGui::BeginDisabled(buffer[0] == '\0');
-        if (ImGui::Button("Salvar"))
+
+        if (m_BankCreateWindow)
         {
-            std::string name(buffer);
-            m_Data.CurrentBank.Name = name;
-            ExportQuestionBank(m_Data.CurrentBank);
-            m_BankExportWindow      = false;
-            buffer[0]               = '\0';
+            bool alreadyExist = false;
+            if (buffer[0] != '\0')
+            {
+                std::string name(buffer);
+                std::filesystem::path folder = FOLDER_PATH;
+                auto absPath = std::filesystem::absolute(folder / (name + ".qbank")).lexically_normal().generic_string();
+            
+                alreadyExist = m_Banks.find(absPath) != m_Banks.end();
+            }
+
+            ImGui::BeginDisabled(buffer[0] == '\0' || alreadyExist);
+            if (ImGui::Button("Criar"))
+            {
+                std::string name(buffer);
+                std::filesystem::path folder = FOLDER_PATH;
+                auto path = std::filesystem::absolute(folder / (name + ".qbank")).lexically_normal().generic_string();
+                m_Banks[path] = {};
+                m_Banks[path].Path = path;
+                m_Session.Banks.push_back(path);
+
+                ExportQuestionBank(m_Banks[path]);
+                ChangeBank(path);
+
+                m_BankCreateWindow = false;
+                buffer[0]          = '\0';
+            }
+            ImGui::EndDisabled();
         }
-        ImGui::EndDisabled();
+        else
+        {
+            ImGui::BeginDisabled(!m_Bank || buffer[0] == '\0');
+            if (ImGui::Button("Salvar"))
+            {
+                std::string name(buffer);
+                std::filesystem::path folder = FOLDER_PATH;
+                m_Bank->Path = std::filesystem::absolute(folder / (name + ".qbank")).lexically_normal().generic_string();
+                ExportQuestionBank(*m_Bank);
+
+                m_BankExportWindow      = false;
+                buffer[0]               = '\0';
+            }
+            ImGui::EndDisabled();
+        }
 
         ImGui::End();
     }
 
     void Application::MainWindow()
     {
-        ImGui::SetNextWindowDockID(ImGui::GetID("MyDockspace"), ImGuiCond_Once);
         ImGui::Begin("QBank");
 
-        float categoriesHeight = CalculateCategoryButtonsHeight(m_Data.CurrentBank.Categories, ImGui::GetContentRegionAvail().x);
-        ImGui::BeginChild("Categories", ImVec2(0, categoriesHeight));
-        DrawCategoryButtons(m_Data.CurrentBank.Categories, ImGui::GetContentRegionAvail().x);
-        ImGui::EndChild();
+        if (m_Bank)
+        {
+            float categoriesHeight = CalculateCategoryButtonsHeight(m_Bank->Categories, ImGui::GetContentRegionAvail().x);
+            ImGui::BeginChild("Categories", ImVec2(0, categoriesHeight));
+            DrawCategoryButtons(m_Bank->Categories, ImGui::GetContentRegionAvail().x);
+            ImGui::EndChild();
 
-        if (m_FilteredQuestions.empty() && !m_CategorySelected.empty())
-        {
-            ImGui::Text("Não foi encontrado nenhum resultado para: '%s'", m_CategorySelected.c_str());
-        }
-        else
-        {
-            size_t size = m_FilteredQuestions.empty() ? m_Data.CurrentBank.Questions.size() : m_FilteredQuestions.size();
-            for (size_t i = 0; i < size; ++i)
+            if (m_FilteredQuestions.empty() && !m_CategorySelected.empty())
             {
-                auto& question = m_Data.CurrentBank.Questions[m_FilteredQuestions.empty() ? i : m_FilteredQuestions[i]];
-                ImGui::PushID((int)i);
-
-                bool open = ImGui::TreeNodeEx(("Questão " + std::to_string(i + 1)).c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_FramePadding | ImGuiTreeNodeFlags_Bullet);
-                ImGui::SameLine();
-                if (ImGui::Button("Editar"))
-                {
-                    m_QuestionToEdit = m_FilteredQuestions.empty() ? (int)i : m_FilteredQuestions[i];
-                    m_QuestionWindow = true;
-                }
-
-                if (open)
-                {
-                    float questionDetailsHeight = CalculateQuestionDetailsHeight(question, ImGui::GetContentRegionAvail().x);
-                    questionDetailsHeight = question.Image != 0 ? questionDetailsHeight + QUESTION_IMAGE_HEIGHT : questionDetailsHeight;
-
-                    ImGui::BeginChild("##QuestionDetails", ImVec2(0, questionDetailsHeight), true);
-                    {
-                        DrawCategoryButtons(question.Categories, ImGui::GetContentRegionAvail().x);
-
-                        if (question.Image != 0 && m_Data.CurrentBank.Images[question.Image])
-                        {
-                            float width = ImGui::GetContentRegionAvail().x;
-
-                            ImGui::BeginGroup();
-                            ImGui::PushID((int)question.Image);
-
-                            ImVec2 viewport = { width, QUESTION_IMAGE_HEIGHT };
-                            auto& image = m_Data.CurrentBank.Images[question.Image];
-
-                            ImVec2 cursor = ImGui::GetCursorScreenPos();
-                            ImDrawList* drawList = ImGui::GetWindowDrawList();
-
-                            ImU32 backgroundColor = IM_COL32(30, 30, 30, 255);
-
-                            drawList->AddRectFilled(
-                                cursor,
-                                cursor + viewport,
-                                backgroundColor,
-                                4.0f);
-
-                            float imageWidth = static_cast<float>(image->GetWidth());
-                            float imageHeight = static_cast<float>(image->GetHeight());
-
-                            float targetAspect = imageWidth / imageHeight;
-                            float viewportAspect = viewport.x / viewport.y;
-
-                            ImVec2 imageSize;
-                            if (viewportAspect > targetAspect)
-                            {
-                                imageSize.y = viewport.y;
-                                imageSize.x = imageSize.y * targetAspect;
-                            }
-                            else
-                            {
-                                imageSize.x = viewport.x;
-                                imageSize.y = imageSize.x / targetAspect;
-                            }
-
-                            ImVec2 imagePos;
-                            imagePos.x = cursor.x + (viewport.x - imageSize.x) * 0.5f;
-                            imagePos.y = cursor.y + (viewport.y - imageSize.y) * 0.5f;
-
-                            drawList->AddImage(
-                                (ImTextureID)image->GetID(),
-                                imagePos,
-                                imagePos + imageSize
-                            );
-
-                            ImGui::Dummy(imageSize);
-
-                            ImGui::PopID();
-                            ImGui::EndGroup();
-                        }
-
-                        if (!question.Text.empty())
-                        {
-                            float questionInfoHeight = CalculateWrappedTextHeight(question.Text, ImGui::GetContentRegionAvail().x, PADDING);
-                            ImGui::BeginChild("##QuestionInfo", ImVec2(0, questionInfoHeight), true);
-
-                            ImGui::SetCursorPos(ImVec2(PADDING, PADDING));
-                            ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x - PADDING);
-                            ImGui::TextUnformatted(question.Text.c_str());
-                            ImGui::PopTextWrapPos();
-
-                            ImGui::EndChild();
-                        }
-
-                        if (ImGui::BeginTable("##AnswerOptions", 3, ImGuiTableFlags_SizingStretchProp))
-                        {
-                            ImGui::TableSetupColumn("A", ImGuiTableColumnFlags_WidthStretch);
-                            ImGui::TableSetupColumn("B", ImGuiTableColumnFlags_WidthStretch);
-                            ImGui::TableSetupColumn("C", ImGuiTableColumnFlags_WidthStretch);
-
-                            const int optionCount = question.CurrentOptionIndex;
-                            for (int i = 0; i < optionCount; i += 3)
-                            {
-                                ImGui::TableNextRow();
-
-                                for (size_t column = 0; column < 3; column++)
-                                {
-                                    const size_t optionIndex = i + column;
-
-                                    ImGui::TableNextColumn();
-
-                                    if (optionIndex >= optionCount)
-                                        continue;
-
-                                    auto index = static_cast<int>(optionIndex);
-                                    ImGui::PushID(index);
-
-                                    bool marked = question.OptionMarkedIndex == index;
-                                    if (ImGui::Checkbox("", &marked))
-                                    {
-                                        question.OptionMarkedIndex = question.OptionMarkedIndex == index ? -1 : index;
-                                    }
-                                    ImGui::SameLine();
-                                    ImGui::Text("(%c)", 'A' + static_cast<char>(optionIndex));
-                                    ImGui::SameLine();
-                                    ImGui::PushTextWrapPos();
-                                    ImGui::TextUnformatted(question.Options[optionIndex].c_str());
-                                    ImGui::PopTextWrapPos();
-
-                                    ImGui::PopID();
-                                }
-                            }
-                            ImGui::EndTable();
-                        }
-                    }
-                    ImGui::EndChild();
-
-                    ImGui::TreePop();
-                }
-
-                ImGui::PopID();
+                ImGui::Text("Não foi encontrado nenhum resultado para: '%s'", m_CategorySelected.c_str());
             }
+            else
+            {
+                size_t size = m_FilteredQuestions.empty() ? m_Bank->Questions.size() : m_FilteredQuestions.size();
+                for (size_t i = 0; i < size; ++i)
+                {
+                    auto& question = m_Bank->Questions[m_FilteredQuestions.empty() ? i : m_FilteredQuestions[i]];
+                    ImGui::PushID((int)i);
+
+                    bool open = ImGui::TreeNodeEx(("Questão " + std::to_string(i + 1)).c_str(), ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_FramePadding | ImGuiTreeNodeFlags_Bullet);
+                    ImGui::SameLine();
+                    if (ImGui::Button("Editar"))
+                    {
+                        m_QuestionToEdit = m_FilteredQuestions.empty() ? (int)i : m_FilteredQuestions[i];
+                        m_QuestionWindow = true;
+                    }
+
+                    if (open)
+                    {
+                        float questionDetailsHeight = CalculateQuestionDetailsHeight(question, ImGui::GetContentRegionAvail().x);
+                        questionDetailsHeight = question.Image != 0 ? questionDetailsHeight + QUESTION_IMAGE_HEIGHT : questionDetailsHeight;
+
+                        ImGui::BeginChild("##QuestionDetails", ImVec2(0, questionDetailsHeight), true);
+                        {
+                            DrawCategoryButtons(question.Categories, ImGui::GetContentRegionAvail().x);
+
+                            if (question.Image != 0 && m_Bank->Images[question.Image])
+                            {
+                                float width = ImGui::GetContentRegionAvail().x;
+
+                                ImGui::BeginGroup();
+                                ImGui::PushID((int)question.Image);
+
+                                ImVec2 viewport = { width, QUESTION_IMAGE_HEIGHT };
+                                auto& image = m_Bank->Images[question.Image];
+
+                                ImVec2 cursor = ImGui::GetCursorScreenPos();
+                                ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+                                ImU32 backgroundColor = IM_COL32(30, 30, 30, 255);
+
+                                drawList->AddRectFilled(
+                                    cursor,
+                                    cursor + viewport,
+                                    backgroundColor,
+                                    4.0f);
+
+                                float imageWidth = static_cast<float>(image->GetWidth());
+                                float imageHeight = static_cast<float>(image->GetHeight());
+
+                                float targetAspect = imageWidth / imageHeight;
+                                float viewportAspect = viewport.x / viewport.y;
+
+                                ImVec2 imageSize;
+                                if (viewportAspect > targetAspect)
+                                {
+                                    imageSize.y = viewport.y;
+                                    imageSize.x = imageSize.y * targetAspect;
+                                }
+                                else
+                                {
+                                    imageSize.x = viewport.x;
+                                    imageSize.y = imageSize.x / targetAspect;
+                                }
+
+                                ImVec2 imagePos;
+                                imagePos.x = cursor.x + (viewport.x - imageSize.x) * 0.5f;
+                                imagePos.y = cursor.y + (viewport.y - imageSize.y) * 0.5f;
+
+                                drawList->AddImage(
+                                    (ImTextureID)image->GetID(),
+                                    imagePos,
+                                    imagePos + imageSize
+                                );
+
+                                ImGui::Dummy(imageSize);
+
+                                ImGui::PopID();
+                                ImGui::EndGroup();
+                            }
+
+                            if (!question.Text.empty())
+                            {
+                                float questionInfoHeight = CalculateWrappedTextHeight(question.Text, ImGui::GetContentRegionAvail().x, PADDING);
+                                ImGui::BeginChild("##QuestionInfo", ImVec2(0, questionInfoHeight), true);
+
+                                ImGui::SetCursorPos(ImVec2(PADDING, PADDING));
+                                ImGui::PushTextWrapPos(ImGui::GetContentRegionAvail().x - PADDING);
+                                ImGui::TextUnformatted(question.Text.c_str());
+                                ImGui::PopTextWrapPos();
+
+                                ImGui::EndChild();
+                            }
+
+                            if (ImGui::BeginTable("##AnswerOptions", 3, ImGuiTableFlags_SizingStretchProp))
+                            {
+                                ImGui::TableSetupColumn("A", ImGuiTableColumnFlags_WidthStretch);
+                                ImGui::TableSetupColumn("B", ImGuiTableColumnFlags_WidthStretch);
+                                ImGui::TableSetupColumn("C", ImGuiTableColumnFlags_WidthStretch);
+
+                                const int optionCount = question.CurrentOptionIndex;
+                                for (int i = 0; i < optionCount; i += 3)
+                                {
+                                    ImGui::TableNextRow();
+
+                                    for (size_t column = 0; column < 3; column++)
+                                    {
+                                        const size_t optionIndex = i + column;
+
+                                        ImGui::TableNextColumn();
+
+                                        if (optionIndex >= optionCount)
+                                            continue;
+
+                                        auto index = static_cast<int>(optionIndex);
+                                        ImGui::PushID(index);
+
+                                        bool marked = question.OptionMarkedIndex == index;
+                                        if (ImGui::Checkbox("", &marked))
+                                        {
+                                            question.OptionMarkedIndex = question.OptionMarkedIndex == index ? -1 : index;
+                                        }
+                                        ImGui::SameLine();
+                                        ImGui::Text("(%c)", 'A' + static_cast<char>(optionIndex));
+                                        ImGui::SameLine();
+                                        ImGui::PushTextWrapPos();
+                                        ImGui::TextUnformatted(question.Options[optionIndex].c_str());
+                                        ImGui::PopTextWrapPos();
+
+                                        ImGui::PopID();
+                                    }
+                                }
+                                ImGui::EndTable();
+                            }
+                        }
+                        ImGui::EndChild();
+
+                        ImGui::TreePop();
+                    }
+
+                    ImGui::PopID();
+                }
+            }
+        }
+        ImGui::End();
+    }
+
+    void Application::SideMenuWindow()
+    {
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0.0f, 0.0f });
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, { 0.0f, 0.0f });
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, { 0.0f, 0.0f });
+        ImGui::Begin("SideMenu");
+
+        const char* text         = "Bancos";
+        const float buttonWidth  = SIDEBAR_WIDTH;
+        const float buttonHeight = ImGui::CalcTextSize(text).x + 20.0f;
+
+        if (VerticalButton(text, ImVec2(buttonWidth, buttonHeight), m_ShowBanks))
+        {
+            m_ShowBanks = !m_ShowBanks;
         }
 
         ImGui::End();
+        ImGui::PopStyleVar(3);
+    }
+
+    void Application::SetupDockspace()
+    {
+        ImGuiID dockspaceID = ImGui::GetID("MyDockspace");
+
+        static bool first = true;
+        if (first)
+        {
+            first = false;
+
+            ImGui::DockBuilderRemoveNode(dockspaceID);
+
+            ImGuiViewport* viewport = ImGui::GetMainViewport();
+
+            ImGui::DockBuilderAddNode(
+                dockspaceID,
+                ImGuiDockNodeFlags_DockSpace
+            );
+
+            ImGui::DockBuilderSetNodeSize(
+                dockspaceID,
+                viewport->WorkSize
+            );
+
+            ImGuiID leftID;
+            ImGuiID centerID;
+
+            const float sidebarWidth = SIDEBAR_WIDTH;
+            const float ratio = sidebarWidth / viewport->WorkSize.x;
+
+            ImGui::DockBuilderSplitNode(
+                dockspaceID,
+                ImGuiDir_Left,
+                ratio,
+                &leftID,
+                &centerID
+            );
+
+            ImGui::DockBuilderDockWindow("SideMenu", leftID);
+            ImGui::DockBuilderDockWindow("QBank", centerID);
+
+            ImGui::DockBuilderFinish(dockspaceID);
+        }
+    }
+
+    void Application::BanksWindow()
+    {
+        if (!m_ShowBanks)
+            return;
+
+        int windowX, windowY;
+        glfwGetWindowPos(m_Window, &windowX, &windowY);
+
+        const float frameHeight = ImGui::GetFrameHeight();
+        const float x = static_cast<float>(windowX) + SIDEBAR_WIDTH;
+        const float y = static_cast<float>(windowY) + frameHeight;
+
+        ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always);
+
+        const float width = static_cast<float>(m_Session.Width) / 4.0f;
+        const float height = static_cast<float>(m_Session.Height) - frameHeight;
+
+        ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+
+        auto color = ImGui::GetStyleColorVec4(ImGuiCol_MenuBarBg);
+        ImGui::PushStyleColor(ImGuiCol_TitleBg, color);
+        ImGui::PushStyleColor(ImGuiCol_TitleBgActive, color);
+        ImGui::Begin("Bancos", &m_ShowBanks, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
+        ImGui::PopStyleColor(2);
+
+        auto size = ImGui::GetContentRegionAvail().x;
+        for (const auto& path : m_Session.Banks)
+        {
+            ImGui::PushID(path.c_str());
+
+            auto name = std::filesystem::path(path).stem().string();
+            if (ImGui::Button(name.c_str(), { size, 0.0f }))
+            {
+                //ImportBank(path);
+                ChangeBank(path);
+            }
+
+            ImGui::PopID();
+        }
+
+        ImGui::End();
+    }
+
+    void Application::ImportBank(const std::string& p_AbsPath, bool p_SaveToSession)
+    {
+        auto path = std::filesystem::absolute(p_AbsPath).lexically_normal().generic_string();
+        m_Banks[path] = ImportQuestionBank(path);
+        if (p_SaveToSession)
+        {
+            auto it = std::find_if(m_Session.Banks.begin(), m_Session.Banks.end(), [&](const auto& p_Path)
+            {
+                return p_Path == path;
+            });
+
+            if (it == m_Session.Banks.end())
+                m_Session.Banks.push_back(path);
+        }
+    }
+
+    void Application::RemoveBank(const std::string& p_AbsPath)
+    {
+        if (m_Session.StartBank == p_AbsPath)
+        {
+            m_Bank              = nullptr;
+            m_Session.StartBank = "";
+        }
+
+        m_Banks.erase(p_AbsPath);
+        std::erase_if(m_Session.Banks, [&](const std::string& p_Bank)
+        {
+            return p_Bank == p_AbsPath;
+        });
+    }
+
+    void Application::ChangeBank(const std::string& p_AbsPath)
+    {
+        auto path               = std::filesystem::absolute(p_AbsPath).lexically_normal().generic_string();
+        auto it                 = m_Banks.find(path);
+        if (it != m_Banks.end())
+        {
+            m_Bank              = &m_Banks[path];
+            m_Session.StartBank = path;
+        }
     }
 
     void Application::DrawCategoryButtons(const std::string& p_Categories, float p_Width)
@@ -1937,11 +2260,11 @@ namespace QB
             if (ImGui::Button(category.c_str(), ImVec2(buttonWidth, 0.0f)))
             {
                 m_FilteredQuestions.clear();
-                if (!selected)
+                if (!selected && m_Bank)
                 {
-                    for (size_t i = 0; i < m_Data.CurrentBank.Questions.size(); i++)
+                    for (size_t i = 0; i < m_Bank->Questions.size(); i++)
                     {
-                        auto& question = m_Data.CurrentBank.Questions[i];
+                        auto& question = m_Bank->Questions[i];
                         if (hasCategory(question.Categories, category))
                         {
                             m_FilteredQuestions.push_back((int)i);
@@ -1952,7 +2275,6 @@ namespace QB
             }
 
             ImGui::PopStyleColor(3);
-
             first = false;
         }
     }

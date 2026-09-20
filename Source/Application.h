@@ -29,14 +29,6 @@ namespace QB
         int OptionMarkedIndex         = -1;
     };
 
-    struct Bank
-    {
-        std::string Name = "";
-        std::string Categories;
-        std::vector<Question> Questions;
-        std::unordered_map<uint64_t, std::shared_ptr<Image>> Images;
-    };
-
     struct Status
     {
         int CorrectAnswers;
@@ -44,12 +36,26 @@ namespace QB
         std::vector<int> IncorrectQuestions;
     };
 
-    struct ApplicationConfig
+    struct Bank
     {
+        std::string Path = "";
+        std::string Categories;
+        std::vector<Question> Questions;
+        std::unordered_map<uint64_t, std::shared_ptr<Image>> Images;
+        
+        Status CurStatus = {};
+    };
+
+
+    struct AppSession
+    {
+        bool Maximize = false;
+        int Width     = 800;
+        int Height    = 600;
+
+        std::vector<std::string> Banks;
         std::string StartBank = "";
-        bool Maximize         = false;
-        int Width             = 800;
-        int Height            = 600;
+        std::string CategorySelected = "";
     };
 
     class Application
@@ -66,24 +72,29 @@ namespace QB
             void StatusWindow();
             void BankExportWindow();
             void MainWindow();
+            void SideMenuWindow();
+            void SetupDockspace();
+            void BanksWindow();
+
+            void ImportBank(const std::string& p_AbsPath, bool p_SaveToSession = true);
+            void RemoveBank(const std::string& p_AbsPath);
+            void ChangeBank(const std::string& p_AbsPath);
 
         private:
             void DrawCategoryButtons(const std::string& p_Categories, float p_Width);
 
         private:
-            GLFWwindow* m_Window    = nullptr;
+            GLFWwindow* m_Window       = nullptr;
 
-            Status m_Status;
-            bool m_QuestionWindow   = false;
-            bool m_StatusWindow     = false;
-            bool m_BankExportWindow = false;
+            bool m_QuestionWindow      = false;
+            bool m_StatusWindow        = false;
+            bool m_BankExportWindow    = false;
+            bool m_BankCreateWindow    = false;
 
-            struct WindowData
-            {
-                ApplicationConfig Config = {};
-                Bank CurrentBank;
+            AppSession m_Session       = {};
 
-            } m_Data = {};
+            std::unordered_map<std::string, Bank> m_Banks;
+            Bank* m_Bank               = nullptr;
 
             std::vector<std::string> m_BankNames;
 
@@ -94,6 +105,8 @@ namespace QB
             ExternalDragDrop m_ExternalDragDrop;
 
             int m_QuestionToEdit = -1;
+
+            bool m_ShowBanks = false;
     };
 
 } // namespace QB
