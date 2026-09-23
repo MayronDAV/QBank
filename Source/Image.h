@@ -7,7 +7,7 @@
 
 namespace QB
 {
-    enum class TextureFormat : uint8_t
+    enum class ImageFormat : uint8_t
     {
         NONE = 0,
 
@@ -31,7 +31,7 @@ namespace QB
         RGBA32_FLOAT
     };
 
-    enum class TextureWrap : uint8_t
+    enum class ImageWrap : uint8_t
     {
         NONE = 0,
         REPEAT,
@@ -40,7 +40,7 @@ namespace QB
         CLAMP_TO_BORDER
     };
 
-    enum class TextureFilter : uint8_t
+    enum class ImageFilter : uint8_t
     {
         NONE = 0,
         LINEAR,
@@ -51,12 +51,12 @@ namespace QB
     {
         uint32_t Width          = 1;
         uint32_t Height         = 1;
-        TextureFormat Format    = TextureFormat::RGBA8;
-        TextureFilter MinFilter = TextureFilter::LINEAR;
-        TextureFilter MagFilter = TextureFilter::LINEAR;
-        TextureWrap WrapU       = TextureWrap::REPEAT;
-        TextureWrap WrapV       = TextureWrap::REPEAT;
-        TextureWrap WrapW       = TextureWrap::REPEAT;
+        ImageFormat Format      = ImageFormat::RGBA8;
+        ImageFilter MinFilter   = ImageFilter::LINEAR;
+        ImageFilter MagFilter   = ImageFilter::LINEAR;
+        ImageWrap WrapU         = ImageWrap::REPEAT;
+        ImageWrap WrapV         = ImageWrap::REPEAT;
+        ImageWrap WrapW         = ImageWrap::REPEAT;
     };
 
     class Image
@@ -83,6 +83,7 @@ namespace QB
             }
             
             static std::shared_ptr<Image> Create(const ImageSpecification& p_Spec, const uint8_t* p_Data, size_t p_Size);
+            static std::shared_ptr<Image> Create(const std::vector<uint8_t>& p_Data, uint32_t p_Width, uint32_t p_Height);
 
         private:
             void Init(const ImageSpecification& p_Spec);

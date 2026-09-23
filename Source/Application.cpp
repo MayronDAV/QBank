@@ -1,5 +1,6 @@
 #include "Application.h"
 #include "FileDialog.h"
+#include "Clipboard.h"
 
 // std
 #include <iostream>
@@ -7,6 +8,7 @@
 #include <algorithm>
 #include <fstream>
 #include <filesystem>
+#include <ctime>
 
 // lib
 #include <glad/glad.h>
@@ -18,6 +20,7 @@
 #include <stb/stb_image_resize2.h>
 
 
+// TODO: Add an image compressor
 
 namespace QB
 {
@@ -351,7 +354,7 @@ namespace QB
         struct APPHeader
         {
             char Magic[5]         = { 'Q', 'B', 'A', 'P', 'P' };
-            uint32_t Version      = 1;
+            uint32_t Version      = 2;
             size_t BanksCount     = 0;
         };
 
@@ -381,6 +384,23 @@ namespace QB
                 WriteString(out, p_Session.Banks[i]);
             }
 
+            out.write(reinterpret_cast<const char*>(&p_Session.RecentImagesIndex), sizeof(p_Session.RecentImagesIndex));
+            for (size_t i = 0; i < AppSession::MAX_RECENT_IMAGES; i++)
+            {
+                auto& image = p_Session.RecentImages[i];
+
+                bool hasData = !image.Empty();
+                out.write(reinterpret_cast<const char*>(&hasData), sizeof(hasData));
+                if (!hasData) continue;
+
+                out.write(reinterpret_cast<const char*>(&image.Width), sizeof(image.Width));
+                out.write(reinterpret_cast<const char*>(&image.Height), sizeof(image.Height));
+
+                size_t dataSize = image.Data.size();
+                out.write(reinterpret_cast<const char*>(&dataSize), sizeof(dataSize));
+                out.write(reinterpret_cast<const char*>(image.Data.data()), dataSize);
+            }
+
             return true;
         }
 
@@ -401,6 +421,11 @@ namespace QB
 
             APPHeader header;
             in.read(reinterpret_cast<char*>(&header), sizeof(header));
+            if (header.Version > 2)
+            {
+                std::cerr << "Failed to import app session: " << path << ", the session is more up-to-date!\n";
+                return {};
+            }
 
             in.read(reinterpret_cast<char*>(&session.Maximize), sizeof(session.Maximize));
             in.read(reinterpret_cast<char*>(&session.Width), sizeof(session.Width));
@@ -413,6 +438,33 @@ namespace QB
             for (size_t i = 0; i < header.BanksCount; i++)
             {
                 session.Banks[i] = ReadString(in);
+            }
+
+            session.RecentImagesIndex = 0;
+            session.RecentImages.fill({});
+
+            if (header.Version >= 2)
+            {
+                in.read(reinterpret_cast<char*>(&session.RecentImagesIndex), sizeof(session.RecentImagesIndex));
+                for (size_t i = 0; i < AppSession::MAX_RECENT_IMAGES; i++)
+                {
+                    bool hasData = false;
+                    in.read(reinterpret_cast<char*>(&hasData), sizeof(hasData));
+                    if (!hasData) continue;
+
+                    ImageData image;
+
+                    in.read(reinterpret_cast<char*>(&image.Width), sizeof(image.Width));
+                    in.read(reinterpret_cast<char*>(&image.Height), sizeof(image.Height));
+
+                    size_t dataSize = 0;
+                    in.read(reinterpret_cast<char*>(&dataSize), sizeof(dataSize));
+
+                    image.Data.resize(dataSize);
+                    in.read(reinterpret_cast<char*>(image.Data.data()), dataSize);
+
+                    session.RecentImages[i] = image;
+                }
             }
 
             return session;
@@ -517,7 +569,7 @@ namespace QB
             ImageSpecification spec = {};
             spec.Width              = width;
             spec.Height             = height;
-            spec.Format             = (isHDR) ? TextureFormat::RGBA32_FLOAT : TextureFormat::RGBA8;
+            spec.Format             = (isHDR) ? ImageFormat::RGBA32_FLOAT : ImageFormat::RGBA8;
 
             uint64_t imageSize      = uint64_t(width) * uint64_t(height) * uint64_t(channels) * uint64_t(bytes);
             auto texture            = Image::Create(spec, data, imageSize);
@@ -632,6 +684,306 @@ namespace QB
 
             return pressed;
         }
+
+        static bool ImageSelectButton(const std::shared_ptr<Image>& p_Image, const ImVec2& p_Size, bool& p_OutRemoveClicked, float p_Rounding = 4.0f, float p_ButtonSize = 20.0f, float p_ButtonPadding = 4.0f)
+        {
+            if (!p_Image) return false;
+
+            const ImVec2 cursorPos = ImGui::GetCursorScreenPos();
+            ImDrawList* drawList   = ImGui::GetWindowDrawList();
+
+            ImGui::InvisibleButton("##Image", p_Size, ImGuiButtonFlags_AllowOverlap);
+
+            const bool hovered = ImGui::IsItemHovered();
+            const bool clicked = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+
+            const float imageWidth = static_cast<float>(p_Image->GetWidth());
+            const float imageHeight = static_cast<float>(p_Image->GetHeight());
+
+            ImVec2 imageSize = p_Size;
+            if (imageWidth > 0.0f && imageHeight > 0.0f)
+            {
+                const float scaleX = p_Size.x / imageWidth;
+                const float scaleY = p_Size.y / imageHeight;
+                const float scale = std::min(scaleX, scaleY);
+
+                imageSize.x = imageWidth * scale;
+                imageSize.y = imageHeight * scale;
+            }
+
+            const ImVec2 imagePos = {
+                cursorPos.x + (p_Size.x - imageSize.x) * 0.5f,
+                cursorPos.y + (p_Size.y - imageSize.y) * 0.5f
+            };
+
+            const ImVec2 imageEnd = {
+                imagePos.x + imageSize.x,
+                imagePos.y + imageSize.y
+            };
+
+            drawList->AddRectFilled(
+                cursorPos,
+                cursorPos + p_Size,
+                ImGui::GetColorU32(ImGuiCol_FrameBg),
+                p_Rounding
+            );
+
+            drawList->AddImageRounded(
+                (ImTextureID)p_Image->GetID(),
+                imagePos,
+                imageEnd,
+                { 0.0f, 0.0f },
+                { 1.0f, 1.0f },
+                IM_COL32(255, 255, 255, 255),
+                p_Rounding
+            );
+
+            drawList->AddRect(
+                cursorPos,
+                cursorPos + p_Size,
+                ImGui::GetColorU32(
+                    hovered
+                    ? ImGuiCol_ButtonHovered
+                    : ImGuiCol_Border
+                ),
+                p_Rounding
+            );
+
+            if (hovered)
+            {
+                ImGui::PushID("RemoveButton");
+
+                const ImVec2 buttonMin = {
+                    cursorPos.x + p_Size.x - p_ButtonSize,
+                    cursorPos.y
+                };
+
+                const ImVec2 buttonMax = {
+                    buttonMin.x + p_ButtonSize,
+                    buttonMin.y + p_ButtonSize
+                };
+
+                ImGui::SetCursorScreenPos(buttonMin);
+
+                ImGui::InvisibleButton("##Remove", { p_ButtonSize, p_ButtonSize }, ImGuiButtonFlags_None);
+
+                const bool removeHovered = ImGui::IsItemHovered();
+                p_OutRemoveClicked       = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+
+                drawList->AddRectFilled(
+                    buttonMin,
+                    buttonMax,
+                    ImGui::GetColorU32(
+                        removeHovered
+                        ? ImGuiCol_ButtonHovered
+                        : ImGuiCol_Button
+                    ),
+                    3.0f
+                );
+
+                const ImVec2 center = {
+                    buttonMin.x + p_ButtonSize * 0.5f,
+                    buttonMin.y + p_ButtonSize * 0.5f
+                };
+
+                const float halfSize = (p_ButtonSize - p_ButtonPadding * 2.0f) * 0.5f;
+                const ImU32 color = ImGui::GetColorU32(ImGuiCol_Text);
+
+                drawList->AddLine(
+                    { center.x - halfSize, center.y - halfSize },
+                    { center.x + halfSize, center.y + halfSize },
+                    color,
+                    1.5f
+                );
+
+                drawList->AddLine(
+                    { center.x + halfSize, center.y - halfSize },
+                    { center.x - halfSize, center.y + halfSize },
+                    color,
+                    1.5f
+                );
+
+                ImGui::PopID();
+            }
+
+            return clicked && !p_OutRemoveClicked;
+        }
+
+        static bool CustomButton(const char* p_Text, const ImVec2& p_Size, float p_Rounding = 4.0f, float p_TextPadding = 8.0f)
+        {
+            ImGui::PushID(p_Text);
+
+            const ImVec2 cursor   = ImGui::GetCursorScreenPos();
+            ImDrawList* drawList  = ImGui::GetWindowDrawList();
+
+            const bool clicked    = ImGui::InvisibleButton("##CustomButton", p_Size);
+            const bool hovered    = ImGui::IsItemHovered();
+            const bool active     = ImGui::IsItemActive();
+
+            ImU32 backgroundColor =  ImGui::GetColorU32(ImGuiCol_Button);
+            if (hovered)
+                backgroundColor   = ImGui::GetColorU32(ImGuiCol_ButtonHovered);
+            if (active)
+                backgroundColor   = ImGui::GetColorU32(ImGuiCol_ButtonActive);
+
+            drawList->AddRectFilled(
+                cursor,
+                cursor + p_Size,
+                backgroundColor,
+                p_Rounding
+            );
+
+            if (hovered)
+            {
+                drawList->AddRectFilled(
+                    cursor,
+                    cursor + p_Size,
+                    IM_COL32(0, 0, 0, active ? 35 : 20),
+                    p_Rounding
+                );
+            }
+
+            const float textWidth  = std::max(0.0f, p_Size.x - p_TextPadding * 2.0f);
+            const float textHeight = std::max(0.0f, p_Size.y - p_TextPadding * 2.0f);
+
+            const ImVec2 textSize  = ImGui::CalcTextSize(p_Text, nullptr, false, textWidth);
+            const ImVec2 textPos   = {
+                cursor.x + (p_Size.x - textSize.x) * 0.5f,
+                cursor.y + (p_Size.y - textSize.y) * 0.5f
+            };
+
+            drawList->AddText(
+                ImGui::GetFont(),
+                ImGui::GetFontSize(),
+                textPos,
+                ImGui::GetColorU32(ImGuiCol_Text),
+                p_Text,
+                nullptr,
+                textWidth
+            );
+
+            auto borderColor = ImGui::GetStyleColorVec4(ImGuiCol_Border);
+            drawList->AddRect(
+                cursor,
+                cursor + p_Size,
+                //ImGui::GetColorU32(ImGuiCol_Border),
+                ImGui::GetColorU32({ borderColor.x, borderColor.y, borderColor.z, 0.8f }),
+                p_Rounding,
+                0,
+                active ? 2.0f : hovered ? 1.5f : 1.0f
+            );
+
+            ImGui::PopID();
+
+            return clicked;
+        }
+
+        static bool ImageButton(const char* p_Text, const std::shared_ptr<Image>& p_Image, const ImVec2& p_Size, bool p_AddText = false, float p_Rounding = 4.0f, float p_TextPadding = 8.0f)
+        {
+            ImGui::PushID(p_Text);
+
+            const ImVec2 cursor   = ImGui::GetCursorScreenPos();
+            ImDrawList* drawList  = ImGui::GetWindowDrawList();
+
+            const bool clicked    = ImGui::InvisibleButton("##CustomButton", p_Size);
+            const bool hovered    = ImGui::IsItemHovered();
+            const bool active     = ImGui::IsItemActive();
+
+            ImU32 backgroundColor = ImGui::GetColorU32(ImGuiCol_Button);
+            if (hovered)
+                backgroundColor   = ImGui::GetColorU32(ImGuiCol_ButtonHovered);
+            if (active)
+                backgroundColor   = ImGui::GetColorU32(ImGuiCol_ButtonActive);
+
+            drawList->AddRectFilled(
+                cursor,
+                cursor + p_Size,
+                backgroundColor,
+                p_Rounding
+            );
+
+            if (hovered)
+            {
+                drawList->AddRectFilled(
+                    cursor,
+                    cursor + p_Size,
+                    IM_COL32(0, 0, 0, active ? 35 : 20),
+                    p_Rounding
+                );
+            }
+
+            if (p_Image)
+            {
+                const float imageWidth     = static_cast<float>(p_Image->GetWidth());
+                const float imageHeight    = static_cast<float>(p_Image->GetHeight());
+                const float imageAspect    = imageWidth / imageHeight;
+                const float viewportAspect = p_Size.x / p_Size.y;
+
+                ImVec2 imageSize;
+                if (viewportAspect > imageAspect)
+                {
+                    imageSize.y            = p_Size.y;
+                    imageSize.x            = imageSize.y * imageAspect;
+                }
+                else
+                {
+                    imageSize.x            = p_Size.x;
+                    imageSize.y            = imageSize.x / imageAspect;
+                }
+
+                const ImVec2 imagePos = {
+                    cursor.x + (p_Size.x - imageSize.x) * 0.5f,
+                    cursor.y + (p_Size.y - imageSize.y) * 0.5f
+                };
+
+                drawList->AddImage(
+                    (ImTextureID)p_Image->GetID(),
+                    imagePos,
+                    imagePos + imageSize
+                );
+            }
+
+            if (p_AddText)
+            {
+                const float textWidth = std::max(0.0f, p_Size.x - p_TextPadding * 2.0f);
+                const float textHeight = std::max(0.0f, p_Size.y - p_TextPadding * 2.0f);
+
+                const ImVec2 textSize = ImGui::CalcTextSize(p_Text, nullptr, false, textWidth);
+                const ImVec2 textPos = {
+                    cursor.x + (p_Size.x - textSize.x) * 0.5f,
+                    cursor.y + (p_Size.y - textSize.y) * 0.5f
+                };
+
+                auto textCol = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+                textCol.z    = 0.8f;
+                drawList->AddText(
+                    ImGui::GetFont(),
+                    ImGui::GetFontSize(),
+                    textPos,
+                    ImGui::GetColorU32(textCol),
+                    p_Text,
+                    nullptr,
+                    textWidth
+                );
+            }
+
+            auto borderColor = ImGui::GetStyleColorVec4(ImGuiCol_Border);
+            borderColor.z    = 0.8f;
+            drawList->AddRect(
+                cursor,
+                cursor + p_Size,
+                //ImGui::GetColorU32(ImGuiCol_Border),
+                ImGui::GetColorU32(borderColor),
+                p_Rounding,
+                0,
+                active ? 2.0f : hovered ? 1.5f : 1.0f
+            );
+
+            ImGui::PopID();
+
+            return clicked;
+        }
+
 
     } // namespace
 
@@ -780,9 +1132,19 @@ namespace QB
                     ImGui::EndMenu();
                 }
 
-                if (ImGui::MenuItem("Adicionar Questão"))
+                if (ImGui::BeginMenu("Editar"))
                 {
-                    m_QuestionWindow = true;
+                    if (ImGui::MenuItem("Adicionar Questão"))
+                    {
+                        m_QuestionWindow = true;
+                    }
+
+                    if (ImGui::MenuItem("Imagens"))
+                    {
+                        m_ImagesWindow = true;
+                    }
+
+                    ImGui::EndMenu();
                 }
 
                 if (ImGui::MenuItem("Finalizar Tentativa", nullptr, false, m_Bank != nullptr))
@@ -811,6 +1173,8 @@ namespace QB
             SideMenuWindow();
 
             BanksWindow();
+
+            ImagesWindow();
 
             QuestionWindow();
 
@@ -867,9 +1231,16 @@ namespace QB
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
         glfwWindowHint(GLFW_MAXIMIZED, m_Session.Maximize);
 
+        int width = 800, height = 600;
+        if (!m_Session.Maximize)
+        {
+            width = m_Session.Width;
+            height = m_Session.Height;
+        }
+        
         m_Window = glfwCreateWindow(
-            m_Session.Width,
-            m_Session.Height,
+            width,
+            height,
             "QBank",
             nullptr,
             nullptr
@@ -970,7 +1341,6 @@ namespace QB
             }
         }
 
-        
         for (const auto& path : m_Session.Banks)
         {
             ImportBank(path, false);
@@ -1072,16 +1442,155 @@ namespace QB
             const bool hovered  = ImGui::IsItemHovered();
             const bool active   = ImGui::IsItemActive();
 
+            static bool imageSelectorJustOpened = false;
             if (clicked)
             {
-                std::string path;
+                ImGui::OpenPopup("ImageSelector");
+                imageSelectorJustOpened = true;
+            }
 
-                if (FileDialog::Open({ { "Images", "*" } }, "", path) == FileDialogResult::SUCCESS)
+            if (ImGui::BeginPopup("ImageSelector"))
+            {
+                static std::shared_ptr<Image> clipImage = nullptr;
+                static std::vector<std::shared_ptr<Image>> recentImages;
+                const float previewSize                 = 60.0f;
+                const float columnWidth                 = previewSize;
+                const float popupWidth                  = 6.0f * columnWidth - PADDING * 2.0f;
+
+                if (imageSelectorJustOpened || !clipImage)
                 {
-                    const auto hash                 = HashString(path);
-                    m_Bank->Images[hash] = LoadImage(path);
-                    question.Image                  = hash;
+                    clipImage = nullptr;
+
+                    auto newImage = GetClipboardImage();
+                    if (newImage)
+                        clipImage = newImage;
+
+                    recentImages.clear();
+                    recentImages.resize(AppSession::MAX_RECENT_IMAGES);
+
+                    for (size_t i = 0; i < AppSession::MAX_RECENT_IMAGES; i++)
+                    {
+                        auto imageData = m_Session.RecentImages[i];
+                        if (imageData.Empty())
+                        {
+                            recentImages[i] = nullptr;
+                            continue;
+                        }
+
+                        recentImages[i] = Image::Create(imageData.Data, imageData.Width, imageData.Height);
+                    }
                 }
+
+                if (CustomButton("Procurar Imagem", { popupWidth / 2.0f, 120.0f }))
+                {
+                    std::string path;
+                    if (FileDialog::Open({ { "Images", "*" } }, "", path) == FileDialogResult::SUCCESS)
+                    {
+                        const auto hash                 = HashString(path);
+                        m_Bank->Images[hash] = LoadImage(path);
+                        question.Image                  = hash;
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+
+                ImGui::SameLine();
+
+                ImGui::BeginDisabled(clipImage == nullptr);
+                if (ImageButton("Área de Transferência", clipImage, { popupWidth / 2.0f, 120.0f }, clipImage == nullptr))
+                {
+                    auto handle = LoadClipboardImage(clipImage);
+                    if (handle)
+                    {
+                        auto it = m_Bank->Images.find(handle);
+                        if (it != m_Bank->Images.end())
+                            question.Image = handle;
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndDisabled();
+
+                ImGui::SeparatorText("Imagens Recentes");
+
+                ImGui::BeginChild("##RecentImagesChild", { popupWidth, columnWidth + PADDING }, false);
+                auto size = ImGui::GetContentRegionAvail();
+
+                const size_t imageCount = std::min(m_Session.RecentImagesIndex, AppSession::MAX_RECENT_IMAGES);
+                const int columns       = (int)AppSession::MAX_RECENT_IMAGES;
+                int imageToRemove       = -1;
+
+                if (ImGui::BeginTable("##RecentImages", columns, ImGuiTableFlags_SizingFixedSame))
+                {
+                    for (int i = 0; i < columns; i++)
+                    {
+                        ImGui::TableSetupColumn(nullptr, ImGuiTableColumnFlags_WidthFixed, columnWidth);
+                    }
+
+                    ImGui::TableNextRow();
+
+                    for (size_t column = 0; column < imageCount; ++column)
+                    {
+                        ImGui::TableSetColumnIndex(static_cast<int>(column));
+
+                        auto& imageTexture = recentImages[column];
+                        if (!imageTexture)
+                            continue;
+
+                        ImGui::PushID(static_cast<int>(column));
+
+                        bool removeClicked = false;
+                        const bool selected = ImageSelectButton(imageTexture, { previewSize, previewSize }, removeClicked);
+
+                        if (selected)
+                        {
+                            auto curTime = time(nullptr);
+                            auto hash = static_cast<uint64_t>(curTime);
+                            HashCombine(hash, imageTexture->GetWidth(), imageTexture->GetHeight());
+
+                            if (hash)
+                            {
+                                m_Bank->Images[hash] = imageTexture;
+                                question.Image = hash;
+                                PromoteRecentImage(column);
+                            }
+
+                            ImGui::PopID();
+
+                            ImGui::CloseCurrentPopup();
+                            break;
+                        }
+
+                        if (removeClicked)
+                        {
+                            imageToRemove = static_cast<int>(column);
+                        }
+
+                        ImGui::PopID();
+                    }
+
+                    ImGui::EndTable();
+                }
+
+
+                if (imageToRemove >= 0)
+                {
+                    const size_t imageCount = std::min(m_Session.RecentImagesIndex, AppSession::MAX_RECENT_IMAGES);
+                    if (imageToRemove < imageCount)
+                    {
+                        for (size_t i = imageToRemove; i + 1 < imageCount; ++i)
+                        {
+                            recentImages[i] = recentImages[i + 1];
+                        }
+
+                        recentImages[imageCount - 1] = nullptr;
+                    }
+
+                    RemoveRecentImage(static_cast<size_t>(imageToRemove));
+                }
+
+                ImGui::EndChild();
+                
+                imageSelectorJustOpened = false;
+                ImGui::EndPopup();
             }
 
             ImDrawList* drawList  = ImGui::GetWindowDrawList();
@@ -1199,9 +1708,34 @@ namespace QB
                 }
             }
 
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("IMAGES_ITEM"))
+            {
+                uint64_t handle = *(uint64_t*)payload->Data;
+                if (handle)
+                {
+                    auto it = m_Bank->Images.find(handle);
+                    if (it != m_Bank->Images.end())
+                        question.Image = handle;
+                }
+            }
+
             ImGui::EndDragDropTarget();
         }
 
+        if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+            ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V))
+        {
+            if (!ImGui::GetIO().WantTextInput)
+            {
+                auto handle = LoadClipboardImage();
+                if (handle)
+                {
+                    auto it = m_Bank->Images.find(handle);
+                    if (it != m_Bank->Images.end())
+                        question.Image = handle;
+                }
+            }
+        }
 
         ImGui::Text("Texto da Questão:");
         ImGui::InputTextMultiline(
@@ -1828,6 +2362,7 @@ namespace QB
             }
             m_StatusWindow = false;
         }
+        
         ImGui::End();
     }
 
@@ -2062,6 +2597,7 @@ namespace QB
                 }
             }
         }
+        
         ImGui::End();
     }
 
@@ -2172,6 +2708,99 @@ namespace QB
         ImGui::End();
     }
 
+    void Application::ImagesWindow()
+    {
+        if (!m_ImagesWindow) return;
+        if (!m_Bank) return;
+
+        ImGui::SetNextWindowSizeConstraints({ 350.0f, 450.0f }, { FLT_MAX, FLT_MAX });
+        ImGui::Begin("##ImagesWindow", &m_ImagesWindow, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse);
+
+        constexpr ImVec2 viewportSize = { 100.0f, 100.0f };
+        const float panelWidth        = ImGui::GetContentRegionAvail().x;
+        const ImVec2 cellSize         = viewportSize + ImVec2(PADDING, PADDING);
+
+        int columnCount               = static_cast<int>(panelWidth / cellSize.x);
+        columnCount                   = std::max(1, columnCount);
+
+        std::vector<uint64_t> images;
+        images.reserve(m_Bank->Images.size());
+
+        for (const auto& [handle, image] : m_Bank->Images)
+        {
+            if (image)
+                images.push_back(handle);
+        }
+
+        std::vector<uint64_t> imagesToRemove;
+
+        if (ImGui::BeginTable("##ImagesTable", columnCount, ImGuiTableFlags_SizingFixedFit))
+        {
+            ImGuiListClipper clipper;
+            const size_t imagesCount = images.size();
+            const int rowCount       = static_cast<int>((imagesCount + columnCount - 1) / columnCount);
+            const float rowHeight    = viewportSize.y + ImGui::GetTextLineHeight() * 2.0f + PADDING;
+
+            clipper.Begin(rowCount, rowHeight);
+            while (clipper.Step())
+            {
+                for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++)
+                {
+                    ImGui::TableNextRow();
+
+                    for (int column = 0; column < columnCount; column++)
+                    {
+                        const int index = row * columnCount + column;
+                        if (index >= static_cast<int>(imagesCount))
+                            continue;
+
+                        ImGui::TableSetColumnIndex(column);
+
+                        const uint64_t handle = images[index];
+                        auto imageIt          = m_Bank->Images.find(handle);
+                        if (imageIt == m_Bank->Images.end())
+                            continue;
+
+                        const std::shared_ptr<Image>& image = imageIt->second;
+                        if (!image)
+                            continue;
+
+                        ImGui::PushID(static_cast<int>(index));
+
+                        bool removeClicked = false;
+                        ImageSelectButton(image, viewportSize, removeClicked);
+                        if (removeClicked)
+                        {
+                            imagesToRemove.push_back(handle);
+                        }
+
+                        if (!removeClicked && ImGui::BeginDragDropSource())
+                        {
+                            ImGui::SetDragDropPayload("IMAGES_ITEM", &handle, sizeof(handle));
+                            ImGui::EndDragDropSource();
+                        }
+
+                        ImGui::PopID();
+
+                    }
+                }
+            }
+
+            ImGui::EndTable();
+        }
+
+        for (const auto& handle : imagesToRemove)
+        {
+            if (handle)
+            {
+                m_Bank->Images[handle] = nullptr;
+                m_Bank->Images.erase(handle);
+            }
+        }
+
+        ImGui::End();
+    }
+
     void Application::ImportBank(const std::string& p_AbsPath, bool p_SaveToSession)
     {
         auto path = std::filesystem::absolute(p_AbsPath).lexically_normal().generic_string();
@@ -2212,6 +2841,102 @@ namespace QB
             m_Bank              = &m_Banks[path];
             m_Session.StartBank = path;
         }
+    }
+
+    std::shared_ptr<Image> Application::GetClipboardImage()
+    {
+        auto data  = Clipboard::GetImage();
+        if (!data)
+            return nullptr;
+
+        auto image = Image::Create(data->Pixels, data->Width, data->Height);
+        if (!image)
+            return nullptr;
+
+        return image;
+    }
+
+    uint64_t Application::LoadClipboardImage()
+    {
+        if (!m_Bank)
+            return 0;
+
+        auto image = GetClipboardImage();
+        if (!image)
+            return 0;
+
+        return LoadClipboardImage(image);
+    }
+
+    uint64_t Application::LoadClipboardImage(const std::shared_ptr<Image>& p_Image)
+    {
+        if (!m_Bank)
+            return 0;
+
+        if (!p_Image)
+            return 0;
+
+        ImageData data = {};
+        data.Width     = p_Image->GetWidth();
+        data.Height    = p_Image->GetHeight();
+        data.Data      = p_Image->GetData();
+
+        auto curTime   = time(nullptr);
+
+        auto hash      = static_cast<uint64_t>(curTime);
+        HashCombine(hash, data.Width, data.Height);
+
+
+        const size_t imageCount = std::min(m_Session.RecentImagesIndex, AppSession::MAX_RECENT_IMAGES);
+        const size_t newCount   = std::min(imageCount + 1, AppSession::MAX_RECENT_IMAGES);
+
+        for (size_t i = newCount; i > 0; --i)
+        {
+            const size_t destination = i - 1;
+            if (destination == 0)
+                continue;
+
+            m_Session.RecentImages[destination] = m_Session.RecentImages[destination - 1];
+        }
+
+        m_Session.RecentImages[0]   = data;
+        m_Session.RecentImagesIndex = newCount;
+        m_Bank->Images[hash]        = p_Image;
+
+        return hash;
+    }
+
+    void Application::RemoveRecentImage(size_t p_Index)
+    {
+        const size_t imageCount                 = std::min(m_Session.RecentImagesIndex, AppSession::MAX_RECENT_IMAGES);
+        if (p_Index >= imageCount)
+            return;
+
+        for (size_t i = p_Index; i + 1 < imageCount; ++i)
+        {
+            m_Session.RecentImages[i]          = m_Session.RecentImages[i + 1];
+        }
+
+        m_Session.RecentImages[imageCount - 1] = {};
+        m_Session.RecentImagesIndex            = imageCount - 1;
+    }
+
+    void Application::PromoteRecentImage(size_t p_Index)
+    {
+        const size_t imageCount = std::min(m_Session.RecentImagesIndex, AppSession::MAX_RECENT_IMAGES);
+        if (p_Index >= imageCount)
+            return;
+
+        if (p_Index == 0)
+            return;
+
+        ImageData selected = m_Session.RecentImages[p_Index];
+        for (size_t i = p_Index; i > 0; --i)
+        {
+            m_Session.RecentImages[i] = m_Session.RecentImages[i - 1];
+        }
+
+        m_Session.RecentImages[0] = selected;
     }
 
     void Application::DrawCategoryButtons(const std::string& p_Categories, float p_Width)
