@@ -1,6 +1,7 @@
 #pragma once
 #include "Image.h"
 #include "ExternalDragDrop.h"
+#include "Panel.h"
 
 // std
 #include <string>
@@ -79,6 +80,8 @@ namespace QB
         size_t RecentImagesIndex = 0;
     };
 
+    float CalculateQuestionDetailsHeight(const Question& p_Question, float p_Width);
+
     class Application
     {
         public:
@@ -87,54 +90,55 @@ namespace QB
             ~Application();
 
             void Run();
-        private:
-            void Init(bool p_LoadStartBank = true);
-            void QuestionWindow();
-            void StatusWindow();
-            void BankExportWindow();
-            void MainWindow();
-            void SideMenuWindow();
-            void SetupDockspace();
-            void BanksWindow();
-            void ImagesWindow();
+
+            Bank* GetCurrentBank() { return m_Bank; }
+            ExternalDragDrop& GetExternalDragDrop() { return m_ExternalDragDrop; }
+            std::shared_ptr<Image>& GetWhiteImage() { return m_WhiteImage; }
+
+            std::shared_ptr<Image> GetClipboardImage();
+            uint64_t LoadClipboardImage();
+            uint64_t LoadClipboardImage(const std::shared_ptr<Image>& p_Image);
 
             void ImportBank(const std::string& p_AbsPath, bool p_SaveToSession = true);
             void RemoveBank(const std::string& p_AbsPath);
             void ChangeBank(const std::string& p_AbsPath);
-            std::shared_ptr<Image> GetClipboardImage();
-            uint64_t LoadClipboardImage();
-            uint64_t LoadClipboardImage(const std::shared_ptr<Image>& p_Image);
             void RemoveRecentImage(size_t p_Index);
             void PromoteRecentImage(size_t p_Index);
 
-        private:
-            void DrawCategoryButtons(const std::string& p_Categories, float p_Width);
+            GLFWwindow* GetWindow() { return m_Window; }
+
+            AppSession& GetSession() { return m_Session; }
+            static Application& Get() { return *s_Instance; }
 
         private:
-            GLFWwindow* m_Window       = nullptr;
+            void Init(bool p_LoadStartBank = true);
+            void SetupDockspace();
+            void BankExportWindow();
+            void MainWindow();
+            void SideMenuWindow();
 
-            bool m_QuestionWindow      = false;
-            bool m_StatusWindow        = false;
-            bool m_BankExportWindow    = false;
-            bool m_BankCreateWindow    = false;
-            bool m_ImagesWindow        = false;
+        private:
+            GLFWwindow* m_Window                  = nullptr;
 
-            AppSession m_Session       = {};
+            AppSession m_Session                  = {};
 
             std::unordered_map<std::string, Bank> m_Banks;
-            Bank* m_Bank               = nullptr;
+            Bank* m_Bank                          = nullptr;
+
+            std::unordered_map<std::string, std::shared_ptr<Panel>> m_Panels;
+
+            bool m_BankExportWindow               = false;
+            bool m_BankCreateWindow               = false;
 
             std::vector<std::string> m_BankNames;
 
-            std::string m_CategorySelected = "";
+            std::string m_CategorySelected        = "";
             std::vector<int> m_FilteredQuestions;
 
-            std::shared_ptr<Image> m_WhiteImage = nullptr;
+            std::shared_ptr<Image> m_WhiteImage   = nullptr;
             ExternalDragDrop m_ExternalDragDrop;
 
-            int m_QuestionToEdit = -1;
-
-            bool m_ShowBanks = false;
+            inline static Application* s_Instance = nullptr;
     };
 
 } // namespace QB
